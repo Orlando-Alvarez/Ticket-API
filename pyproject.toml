@@ -1,0 +1,19 @@
+[project]
+name = "ticket-api"
+version = "0.1.0"
+description = "Professional ticket and incident API built with FastAPI."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0,<1.0.0",
+    "pydantic>=2.9.0,<3.0.0",
+    "pydantic-settings>=2.5.0,<3.0.0",
+    "uvicorn[standard]>=0.30.0,<1.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
