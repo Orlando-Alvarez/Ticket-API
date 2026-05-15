@@ -2,7 +2,7 @@
 
 Ticket-API is a backend API for a portfolio-oriented ticketing and incident management system. It is designed for junior backend, cloud, and platform engineering roles.
 
-This first phase provides a clean FastAPI foundation with versioned routes, a health check endpoint, basic error handling, automated testing with `pytest`, and a GitHub Actions CI workflow.
+This project provides a clean FastAPI foundation with versioned routes, a health check endpoint, basic error handling, automated testing with `pytest`, SQLAlchemy models, PostgreSQL-ready configuration, Docker-based local development, and a GitHub Actions CI workflow.
 
 ## Project Goals
 
@@ -14,13 +14,19 @@ This project is being built to demonstrate practical backend and cloud-readiness
 - Consistent error handling
 - Automated testing with `pytest`
 - Continuous Integration with GitHub Actions
-- Preparation for future PostgreSQL persistence
-- Preparation for Docker and cloud deployment
+- PostgreSQL persistence readiness with SQLAlchemy
+- Docker-based local development
+- Preparation for future cloud deployment
 
 ## Requirements
 
 - Python 3.11+
 - `pip`
+
+For Docker-based local development:
+
+- Docker
+- Docker Compose
 
 ## Local Installation
 
@@ -55,6 +61,42 @@ The API will be available at:
 - `http://127.0.0.1:8000/redoc`
 - `http://127.0.0.1:8000/api/v1/health`
 
+## Run With Docker
+
+Build and start the FastAPI and PostgreSQL containers:
+
+```bash
+docker compose up --build
+```
+
+The API will be available at:
+
+- `http://127.0.0.1:8000/docs`
+- `http://127.0.0.1:8000/redoc`
+- `http://127.0.0.1:8000/api/v1/health`
+
+The PostgreSQL container is exposed locally on port `5432`.
+
+Stop the containers:
+
+```bash
+docker compose down
+```
+
+Stop the containers and remove the local PostgreSQL volume:
+
+```bash
+docker compose down -v
+```
+
+Docker Compose passes this database URL to the API container:
+
+```text
+postgresql+psycopg://ticket_user:ticket_password@db:5432/ticket_api
+```
+
+The application is not creating tables or running migrations yet. Alembic and database migrations are planned for a later phase.
+
 ## Available Endpoint
 
 ### `GET /api/v1/health`
@@ -78,26 +120,30 @@ The project includes automated tests using `pytest`.
 Run the tests locally:
 
 ```bash
-python -m pytest
+.venv\Scripts\python.exe -m pytest
 ```
 
-Current test coverage includes the health check endpoint:
+Current test coverage includes:
 
 ```http
 GET /api/v1/health
 ```
 
-The test validates that the API:
+The tests validate that the API:
 
 - Returns HTTP status code `200`
 - Returns `status: "ok"`
 - Returns `service: "ticket-api"`
 - Includes a `version` field
+- Defines SQLAlchemy model metadata
+- Uses the expected PostgreSQL psycopg database URL configuration
 
-Test file:
+Test files:
 
 ```text
 tests/test_health.py
+tests/test_models.py
+tests/test_database_config.py
 ```
 
 ## Continuous Integration
@@ -131,11 +177,18 @@ app/
   api/
     routes/
   core/
+  db/
+  models/
   schemas/
   main.py
 
 tests/
   test_health.py
+  test_models.py
+  test_database_config.py
+
+Dockerfile
+docker-compose.yml
 
 .github/
   workflows/
@@ -161,15 +214,13 @@ Completed:
 - Initial README
 - Automated health endpoint test with `pytest`
 - GitHub Actions CI workflow
+- SQLAlchemy domain models
+- Database configuration
+- SQLAlchemy engine and session setup
+- Dockerfile and Docker Compose local development setup
 
 ## Next Phase
 
-The next phase will add persistence with PostgreSQL and initial domain models without breaking the current project structure.
+The next phase will add database migrations without breaking the current project structure.
 
-Planned models:
-
-- User
-- Ticket
-- Incident
-
-Future phases will include authentication, role-based access control, Docker, CI/CD improvements, and cloud deployment.
+Future phases will include CRUD endpoints, authentication, role-based access control, CI/CD improvements, and cloud deployment.
