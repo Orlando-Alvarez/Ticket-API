@@ -35,7 +35,6 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(op.f("ix_users_email"), "users", ["email"], unique=True)
-    op.create_index(op.f("ix_users_id"), "users", ["id"], unique=False)
 
     op.create_table(
         "incidents",
@@ -55,7 +54,6 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["reported_by_id"], ["users.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index(op.f("ix_incidents_id"), "incidents", ["id"], unique=False)
 
     op.create_table(
         "tickets",
@@ -77,14 +75,10 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["requester_id"], ["users.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index(op.f("ix_tickets_id"), "tickets", ["id"], unique=False)
 
 
 def downgrade() -> None:
-    op.drop_index(op.f("ix_tickets_id"), table_name="tickets")
     op.drop_table("tickets")
-    op.drop_index(op.f("ix_incidents_id"), table_name="incidents")
     op.drop_table("incidents")
-    op.drop_index(op.f("ix_users_id"), table_name="users")
     op.drop_index(op.f("ix_users_email"), table_name="users")
     op.drop_table("users")
