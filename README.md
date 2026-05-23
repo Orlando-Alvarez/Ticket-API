@@ -2,7 +2,7 @@
 
 Ticket-API is a backend API for a portfolio-oriented ticketing and incident management system. It is designed for junior backend, cloud, and platform engineering roles.
 
-This project provides a clean FastAPI foundation with versioned routes, a health check endpoint, basic error handling, automated testing with `pytest`, SQLAlchemy models, PostgreSQL-ready configuration, Docker-based local development, and a GitHub Actions CI workflow.
+This project provides a clean FastAPI foundation with versioned routes, a health check endpoint, basic error handling, automated testing with `pytest`, SQLAlchemy models, Alembic migrations, PostgreSQL-ready configuration, Docker-based local development, and a GitHub Actions CI workflow.
 
 ## Project Goals
 
@@ -15,6 +15,7 @@ This project is being built to demonstrate practical backend and cloud-readiness
 - Automated testing with `pytest`
 - Continuous Integration with GitHub Actions
 - PostgreSQL persistence readiness with SQLAlchemy
+- Database migrations with Alembic
 - Docker-based local development
 - Preparation for future cloud deployment
 
@@ -95,7 +96,29 @@ Docker Compose passes this database URL to the API container:
 postgresql+psycopg://ticket_user:ticket_password@db:5432/ticket_api
 ```
 
-The application is not creating tables or running migrations yet. Alembic and database migrations are planned for a later phase.
+The application does not create tables automatically. Use Alembic to apply database migrations.
+
+## Database Migrations
+
+Start the PostgreSQL container:
+
+```bash
+docker compose up -d db
+```
+
+Apply migrations:
+
+```bash
+.venv\Scripts\alembic.exe upgrade head
+```
+
+Create a new migration after changing SQLAlchemy models:
+
+```bash
+.venv\Scripts\alembic.exe revision --autogenerate -m "describe change"
+```
+
+Alembic reads `DATABASE_URL` from the application settings. For Docker Compose, use the internal database host `db`. For local commands from Windows, use `localhost`.
 
 ## Available Endpoint
 
@@ -182,12 +205,16 @@ app/
   schemas/
   main.py
 
+alembic/
+  versions/
+
 tests/
   test_health.py
   test_models.py
   test_database_config.py
 
 Dockerfile
+alembic.ini
 docker-compose.yml
 
 .github/
@@ -217,10 +244,12 @@ Completed:
 - SQLAlchemy domain models
 - Database configuration
 - SQLAlchemy engine and session setup
+- Alembic migration setup
+- Initial database migration for users, tickets, and incidents
 - Dockerfile and Docker Compose local development setup
 
 ## Next Phase
 
-The next phase will add database migrations without breaking the current project structure.
+The next phase will add API behavior on top of the database layer without breaking the current project structure.
 
 Future phases will include CRUD endpoints, authentication, role-based access control, CI/CD improvements, and cloud deployment.
