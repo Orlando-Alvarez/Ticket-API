@@ -1,8 +1,26 @@
 # Ticket-API
 
-Ticket-API is a backend API for a portfolio-oriented ticketing and incident management system. It is designed for junior backend, cloud, and platform engineering roles.
+Ticket-API is a backend API for a portfolio-oriented ticketing and incident management system. It is designed to demonstrate practical backend, database, testing, containerization, and cloud-readiness skills for junior backend, cloud, and platform engineering roles.
 
-This project provides a clean FastAPI foundation with versioned routes, a health check endpoint, basic error handling, automated testing with `pytest`, SQLAlchemy models, Alembic migrations, PostgreSQL-ready configuration, Docker-based local development, and a GitHub Actions CI workflow.
+The project is built with **FastAPI**, **SQLAlchemy**, **PostgreSQL**, **Alembic**, **Docker Compose**, **pytest**, and **GitHub Actions CI**.
+
+## Overview
+
+Ticket-API provides a clean backend foundation for managing users, tickets, and incidents.
+
+Current functionality includes:
+
+- Versioned FastAPI routes under `/api/v1`
+- Health check endpoint
+- Basic error handling
+- SQLAlchemy domain models
+- PostgreSQL-ready database configuration
+- Alembic database migrations
+- Docker-based local development with PostgreSQL
+- Basic User CRUD endpoints
+- Basic Ticket CRUD endpoints
+- Automated tests with `pytest`
+- GitHub Actions CI workflow
 
 ## Project Goals
 
@@ -10,16 +28,35 @@ This project is being built to demonstrate practical backend and cloud-readiness
 
 - Python backend development with FastAPI
 - Clean API structure and versioned routing
-- Basic service health checks
-- Consistent error handling
+- Request and response validation with Pydantic
+- SQLAlchemy ORM models and relationships
+- PostgreSQL persistence readiness
+- Alembic database schema migrations
+- Docker and Docker Compose local development
 - Automated testing with `pytest`
 - Continuous Integration with GitHub Actions
-- PostgreSQL persistence readiness with SQLAlchemy
-- Database migrations with Alembic
-- Docker-based local development
+- Clear documentation and professional Git workflow
 - Preparation for future cloud deployment
 
+## Tech Stack
+
+- **Python**: main programming language
+- **FastAPI**: backend API framework
+- **Uvicorn**: ASGI server for running FastAPI
+- **Pydantic / pydantic-settings**: data validation and application configuration
+- **SQLAlchemy**: ORM for database models and sessions
+- **PostgreSQL**: relational database
+- **psycopg**: PostgreSQL driver
+- **Alembic**: database migrations
+- **Docker**: containerized application runtime
+- **Docker Compose**: local API + database orchestration
+- **pytest**: automated testing
+- **httpx / TestClient**: API endpoint testing
+- **GitHub Actions**: CI workflow
+
 ## Requirements
+
+For local development:
 
 - Python 3.11+
 - `pip`
@@ -44,13 +81,13 @@ Install the project locally:
 pip install -e .
 ```
 
-For testing, install the testing dependencies:
+Install testing dependencies if needed:
 
 ```bash
 pip install pytest httpx
 ```
 
-## Run the API
+## Run the API Locally
 
 ```bash
 uvicorn app.main:app --reload
@@ -96,7 +133,7 @@ Docker Compose passes this database URL to the API container:
 postgresql+psycopg://ticket_user:ticket_password@db:5432/ticket_api
 ```
 
-The application does not create tables automatically. Use Alembic to apply database migrations.
+The application does **not** create tables automatically. Use Alembic to apply database migrations.
 
 ## Database Migrations
 
@@ -112,17 +149,45 @@ Apply migrations:
 .venv\Scripts\alembic.exe upgrade head
 ```
 
+Alternative:
+
+```bash
+python -m alembic upgrade head
+```
+
 Create a new migration after changing SQLAlchemy models:
 
 ```bash
 .venv\Scripts\alembic.exe revision --autogenerate -m "describe change"
 ```
 
-Alembic reads `DATABASE_URL` from the application settings. For Docker Compose, use the internal database host `db`. For local commands from Windows, use `localhost`.
+Alembic reads `DATABASE_URL` from the application settings.
 
-## Available Endpoint
+Use this host depending on where the command runs:
 
-### `GET /api/v1/health`
+- From Windows/local terminal: `localhost`
+- From inside Docker Compose: `db`
+
+To inspect tables:
+
+```bash
+docker compose exec db psql -U ticket_user -d ticket_api -c "\dt"
+```
+
+Expected tables after migrations:
+
+```text
+users
+tickets
+incidents
+alembic_version
+```
+
+## Available Endpoints
+
+### Health
+
+#### `GET /api/v1/health`
 
 Expected response:
 
@@ -134,7 +199,188 @@ Expected response:
 }
 ```
 
-This endpoint is used to verify that the API is running correctly.
+This endpoint verifies that the API is running correctly.
+
+---
+
+### Users
+
+#### `POST /api/v1/users`
+
+Creates a user.
+
+Example request:
+
+```json
+{
+  "email": "requester@example.com",
+  "full_name": "Test Requester",
+  "hashed_password": "fake-hash",
+  "role": "requester",
+  "is_active": true
+}
+```
+
+Example response:
+
+```json
+{
+  "id": 1,
+  "email": "requester@example.com",
+  "full_name": "Test Requester",
+  "role": "requester",
+  "is_active": true,
+  "created_at": "2026-05-28T20:00:00"
+}
+```
+
+`hashed_password` is accepted only because authentication and real password hashing are not implemented yet. It is **not** returned in API responses.
+
+#### `GET /api/v1/users`
+
+Returns all users.
+
+#### `GET /api/v1/users/{user_id}`
+
+Returns a user by ID.
+
+If the user does not exist, the API returns:
+
+```json
+{
+  "error": {
+    "message": "User not found."
+  }
+}
+```
+
+#### `PATCH /api/v1/users/{user_id}`
+
+Partially updates a user.
+
+Example request:
+
+```json
+{
+  "role": "agent"
+}
+```
+
+If an email already belongs to another user, the API returns HTTP `409 Conflict`:
+
+```json
+{
+  "error": {
+    "message": "Email already exists."
+  }
+}
+```
+
+---
+
+### Tickets
+
+#### `POST /api/v1/tickets`
+
+Creates a ticket.
+
+A valid `requester_id` is required. `assignee_id` is optional, but if provided it must reference an existing user.
+
+Example request:
+
+```json
+{
+  "title": "Cannot access dashboard",
+  "description": "The dashboard returns an error after login.",
+  "priority": "high",
+  "requester_id": 1,
+  "assignee_id": 2
+}
+```
+
+Example response:
+
+```json
+{
+  "id": 1,
+  "title": "Cannot access dashboard",
+  "description": "The dashboard returns an error after login.",
+  "status": "open",
+  "priority": "high",
+  "requester_id": 1,
+  "assignee_id": 2,
+  "created_at": "2026-05-28T20:00:00",
+  "updated_at": null
+}
+```
+
+If the requester does not exist:
+
+```json
+{
+  "error": {
+    "message": "Requester not found."
+  }
+}
+```
+
+If the assignee does not exist:
+
+```json
+{
+  "error": {
+    "message": "Assignee not found."
+  }
+}
+```
+
+#### `GET /api/v1/tickets`
+
+Returns all tickets.
+
+#### `GET /api/v1/tickets/{ticket_id}`
+
+Returns a ticket by ID.
+
+If the ticket does not exist:
+
+```json
+{
+  "error": {
+    "message": "Ticket not found."
+  }
+}
+```
+
+#### `PATCH /api/v1/tickets/{ticket_id}`
+
+Partially updates a ticket.
+
+Example request:
+
+```json
+{
+  "status": "in_progress",
+  "assignee_id": 2
+}
+```
+
+## Manual Testing Flow With Swagger
+
+After starting the API and applying migrations:
+
+1. Open Swagger:
+   - `http://127.0.0.1:8000/docs`
+2. Create a requester:
+   - `POST /api/v1/users`
+3. Create an agent:
+   - `POST /api/v1/users`
+4. Create a ticket using the requester ID:
+   - `POST /api/v1/tickets`
+5. Assign or update the ticket using the agent ID:
+   - `PATCH /api/v1/tickets/{ticket_id}`
+6. List tickets:
+   - `GET /api/v1/tickets`
 
 ## Testing
 
@@ -146,27 +392,37 @@ Run the tests locally:
 .venv\Scripts\python.exe -m pytest
 ```
 
-Current test coverage includes:
+Alternative:
 
-```http
-GET /api/v1/health
+```bash
+python -m pytest
 ```
 
-The tests validate that the API:
+Current test coverage includes:
 
-- Returns HTTP status code `200`
-- Returns `status: "ok"`
-- Returns `service: "ticket-api"`
-- Includes a `version` field
-- Defines SQLAlchemy model metadata
-- Uses the expected PostgreSQL psycopg database URL configuration
+- Health endpoint behavior
+- SQLAlchemy model metadata registration
+- PostgreSQL database URL configuration
+- Basic Ticket CRUD behavior
+- Ticket error handling for missing tickets, requester, and assignee
+- Basic User CRUD behavior
+- User error handling for missing users and duplicate emails
+- Ensuring `hashed_password` is not exposed in user responses
 
-Test files:
+Current test files:
 
 ```text
 tests/test_health.py
 tests/test_models.py
 tests/test_database_config.py
+tests/test_tickets.py
+tests/test_users.py
+```
+
+Current expected result:
+
+```text
+18 passed
 ```
 
 ## Continuous Integration
@@ -199,36 +455,71 @@ This helps verify that the project continues to work after each change.
 app/
   api/
     routes/
+      health.py
+      tickets.py
+      users.py
+    router.py
   core/
+    config.py
+    errors.py
+  crud/
+    tickets.py
+    users.py
   db/
+    base.py
+    session.py
   models/
+    incident.py
+    ticket.py
+    user.py
   schemas/
+    health.py
+    ticket.py
+    user.py
   main.py
 
 alembic/
+  env.py
+  script.py.mako
   versions/
+    20260523_0001_create_initial_tables.py
 
 tests/
+  test_database_config.py
   test_health.py
   test_models.py
-  test_database_config.py
-
-Dockerfile
-alembic.ini
-docker-compose.yml
+  test_tickets.py
+  test_users.py
 
 .github/
   workflows/
     ci.yml
+
+Dockerfile
+docker-compose.yml
+alembic.ini
+pyproject.toml
+README.md
 ```
 
 ## Error Handling Included
 
-The API currently includes basic error handling for:
+The API includes consistent JSON error handling for:
 
-- `404` responses in a consistent JSON format
-- `422` validation errors
-- `500` internal server errors with a generic message that avoids exposing internal details
+- `404 Not Found`
+- `409 Conflict`
+- `422 Validation Error`
+- `500 Internal Server Error`
+
+Example:
+
+```json
+{
+  "error": {
+    "message": "Ticket not found."
+  }
+}
+```
 
 ## Current Status
 
@@ -238,18 +529,44 @@ Completed:
 - Versioned API routing
 - Health check endpoint
 - Basic error handling
-- Initial README
-- Automated health endpoint test with `pytest`
+- Automated testing with `pytest`
 - GitHub Actions CI workflow
 - SQLAlchemy domain models
-- Database configuration
+- PostgreSQL database configuration
 - SQLAlchemy engine and session setup
+- Dockerfile and Docker Compose local development setup
 - Alembic migration setup
 - Initial database migration for users, tickets, and incidents
-- Dockerfile and Docker Compose local development setup
+- Basic Ticket CRUD endpoints
+- Basic User CRUD endpoints
+
+## Current Limitations
+
+The project intentionally does **not** include these features yet:
+
+- Authentication
+- Login endpoint
+- JWT access tokens
+- Password hashing
+- Role-based authorization
+- DELETE endpoints
+- Pagination
+- Filtering
+- Incident CRUD endpoints
+- Cloud deployment configuration
 
 ## Next Phase
 
-The next phase will add API behavior on top of the database layer without breaking the current project structure.
+Recommended next phase:
 
-Future phases will include CRUD endpoints, authentication, role-based access control, CI/CD improvements, and cloud deployment.
+- Add basic Incident CRUD endpoints.
+
+Future phases may include:
+
+- Password hashing and authentication
+- JWT-based login
+- Role-based authorization
+- Pagination and filtering
+- DELETE behavior
+- CI/CD improvements
+- Cloud deployment
