@@ -1,7 +1,12 @@
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_core import PydanticCustomError
+
+
+UserText = Annotated[str, Field(min_length=1, max_length=255)]
+UserRole = Annotated[str, Field(min_length=1, max_length=50)]
 
 
 class UserBase(BaseModel):
@@ -12,31 +17,26 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    hashed_password: str
+    email: UserText
+    full_name: UserText
+    role: UserRole = "requester"
+    hashed_password: UserText
 
 
 class UserUpdate(BaseModel):
-    email: str | None = None
-    full_name: str | None = None
-    hashed_password: str | None = None
-    role: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    email: UserText | None = None
+    full_name: UserText | None = None
+    hashed_password: UserText | None = None
+    role: UserRole | None = None
     is_active: bool | None = None
-    
-    @field_validator(
-    "email",
-    "full_name",
-    "hashed_password",
-    "role",
-    "is_active",
-    mode="before"
-    )
+
+    @field_validator("email", "full_name", "hashed_password", "role", "is_active")
     @classmethod
-    def reject_null(cls, value):
+    def reject_null(cls, value: str | bool | None) -> str | bool:
         if value is None:
-            raise PydanticCustomError(
-                "null_not_allowed",
-                "Field cannot be null"
-            )
+            raise PydanticCustomError("null_not_allowed", "Field cannot be null")
         return value
 
 
