@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from urllib import response
 
 import pytest
 from fastapi.testclient import TestClient
@@ -150,3 +151,23 @@ def test_update_user_returns_conflict_for_duplicate_email(client: TestClient) ->
 
     assert response.status_code == 409
     assert response.json()["error"]["message"] == "Email already exists."
+    
+def test_patch_user_rejects_null_full_name(client: TestClient) -> None:
+    
+    user = create_user(client)
+    user_id= user["id"]
+    original_name= user["full_name"]
+    
+    response = client.patch(
+        f"/api/v1/users/{user_id}",
+        json= {"full_name": None}
+    )
+    
+    assert response.status_code == 422, response.text
+    
+    get_response = client.get(
+        f"/api/v1/users/{user_id}"
+    )
+
+    assert get_response.status_code == 200
+    assert get_response.json()["full_name"] == original_name
