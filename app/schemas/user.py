@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic_core import PydanticCustomError
 
 
 class UserBase(BaseModel):
@@ -20,6 +21,23 @@ class UserUpdate(BaseModel):
     hashed_password: str | None = None
     role: str | None = None
     is_active: bool | None = None
+    
+    @field_validator(
+    "email",
+    "full_name",
+    "hashed_password",
+    "role",
+    "is_active",
+    mode="before"
+    )
+    @classmethod
+    def reject_null(cls, value):
+        if value is None:
+            raise PydanticCustomError(
+                "null_not_allowed",
+                "Field cannot be null"
+            )
+        return value
 
 
 class UserResponse(UserBase):
