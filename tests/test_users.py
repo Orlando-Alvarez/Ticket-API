@@ -1,54 +1,8 @@
-from collections.abc import Generator
-from urllib import response
-
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.orm import Session
 
-from app.db.base import Base
-from app.db.session import get_db
-from app.main import app
-import app.models as models  # noqa: F401
-
-
-engine = create_engine(
-    "sqlite://",
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
-)
-
-TestingSessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine,
-)
-
-
-@pytest.fixture()
-def db_session() -> Generator[Session, None, None]:
-    Base.metadata.create_all(bind=engine)
-    db = TestingSessionLocal()
-
-    try:
-        yield db
-    finally:
-        db.close()
-        Base.metadata.drop_all(bind=engine)
-
-
-@pytest.fixture()
-def client(db_session: Session) -> Generator[TestClient, None, None]:
-    def override_get_db() -> Generator[Session, None, None]:
-        yield db_session
-
-    app.dependency_overrides[get_db] = override_get_db
-
-    with TestClient(app) as test_client:
-        yield test_client
-
-    app.dependency_overrides.clear()
+from app.models.user import User
 
 
 def create_user_payload(email: str = "user@example.com") -> dict[str, object]:
@@ -151,23 +105,52 @@ def test_update_user_returns_conflict_for_duplicate_email(client: TestClient) ->
 
     assert response.status_code == 409
     assert response.json()["error"]["message"] == "Email already exists."
-    
-def test_patch_user_rejects_null_full_name(client: TestClient) -> None:
-    
-    user = create_user(client)
-    user_id= user["id"]
-    original_name= user["full_name"]
-    
-    response = client.patch(
-        f"/api/v1/users/{user_id}",
-        json= {"full_name": None}
-    )
-    
-    assert response.status_code == 422, response.text
-    
-    get_response = client.get(
-        f"/api/v1/users/{user_id}"
-    )
 
-    assert get_response.status_code == 200
-    assert get_response.json()["full_name"] == original_name
+
+USER_TEXT_LIMITS = [("email", 255), ("full_name", 255), ("hashed_password", 255), ("role", 50)]
+
+
+@pytest.mark.parametrize("field", ["email", "full_name", "hashed_password", "role", "is_active"])
+def test_patch_user_rejects_null(client: TestClient, field: str) -> None:
+    user = create_user(client)
+    url = f"/api/v1/users/{user['id']}"
+    response = client.patch(url, json={field: None})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"][0]["loc"] == ["body", field]
+    assert client.get(url).json() == user
+
+
+@pytest.mark.parametrize("field,limit", USER_TEXT_LIMITS)
+def test_user_text_boundaries(client: TestClient, db_session: Session, field: str, limit: int) -> None:
+    payload = create_user_payload()
+    for invalid in ("", "a" * (limit + 1)):
+        response = client.post("/api/v1/users", json={**payload, field: invalid})
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["details"][0]["loc"] == ["body", field]
+
+    created = client.post("/api/v1/users", json={**payload, field: "a" * limit})
+    assert created.status_code == 201, created.text
+    user_id = created.json()["id"]
+    url = f"/api/v1/users/{user_id}"
+
+    for invalid in ("", "b" * (limit + 1)):
+        response = client.patch(url, json={field: invalid})
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["details"][0]["loc"] == ["body", field]
+
+    assert getattr(db_session.get(User, user_id), field) == "a" * limit
+    response = client.patch(url, json={field: "b" * limit})
+    assert response.status_code == 200, response.text
+    assert "hashed_password" not in response.json()
+    assert getattr(db_session.get(User, user_id), field) == "b" * limit
+
+
+def test_patch_user_rejects_unknown_field(client: TestClient) -> None:
+    user = create_user(client)
+    url = f"/api/v1/users/{user['id']}"
+    response = client.patch(url, json={"full_nam": "Ana", "is_active": False})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"][0]["loc"] == ["body", "full_nam"]
+    assert client.get(url).json() == user

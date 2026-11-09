@@ -32,7 +32,7 @@ async def http_error_handler(_: Request, exc: StarletteHTTPException) -> JSONRes
 
 async def validation_error_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=422,
         content={
             "error": {
                 "message": "Validation failed.",
