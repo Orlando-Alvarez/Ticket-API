@@ -5,9 +5,9 @@ It demonstrates modular FastAPI development, PostgreSQL persistence, database
 migrations, OAuth2/JWT authentication, role-based authorization, resource-level
 access control, automated testing, and a professional Git workflow.
 
-The current authentication and security release focuses on protecting user and
-ticket operations. Docker infrastructure improvements are intentionally being
-developed in a separate pull request; see [Docker status](#docker-status).
+The repository also provides a Docker Compose workflow that builds the API,
+starts PostgreSQL, applies Alembic migrations, and exposes the application for
+local use.
 
 ## Key Capabilities
 
@@ -73,7 +73,7 @@ Inactive users cannot log in or access protected endpoints.
 - **pwdlib with Argon2**
 - **Pytest**
 - **httpx2** for compatibility with the current FastAPI/Starlette test client
-- **Docker and Docker Compose** for the basic local database/application setup
+- **Docker and Docker Compose** for the containerized API, migrations, and database
 - **GitHub Actions** for automated test execution
 
 ## Project Structure
@@ -115,6 +115,8 @@ alembic/
     20260523_0001_create_initial_tables.py
 
 tests/
+  integration/
+    test_postgres_schema.py
   conftest.py
   test_auth.py
   test_database_config.py
@@ -129,9 +131,115 @@ tests/
 
 Dockerfile
 docker-compose.yml
+.env.example
 alembic.ini
 pyproject.toml
 ```
+
+## Docker Compose
+
+### Requirements
+
+- Docker Desktop on Windows or macOS, or Docker Engine on Linux
+- Docker Compose v2, available through the `docker compose` command
+- Local ports `8000` and `5432` available
+
+### 1. Configure the environment
+
+Create a local `.env` file from the tracked example.
+
+Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+macOS or Linux:
+
+```bash
+cp .env.example .env
+```
+
+Before starting the services, replace every placeholder in `.env` with your
+own local values. In particular:
+
+- Set `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` for PostgreSQL.
+- Set `JWT_SECRET_KEY` to a long, random value. One way to generate one is:
+
+  ```bash
+  python -c "import secrets; print(secrets.token_urlsafe(48))"
+  ```
+
+Do not commit `.env`, database passwords, JWT secrets, or access tokens. The
+repository ignores `.env`; `.env.example` contains placeholders only.
+
+The two database URLs serve different execution contexts:
+
+- `DATABASE_URL` in `.env.example` uses `localhost` and is intended for running
+  Alembic or the API directly on the host machine.
+- Docker Compose constructs and injects its own `DATABASE_URL` from the
+  `POSTGRES_*` variables. It uses `db` as the host because containers reach
+  PostgreSQL by its Compose service name.
+
+The `api` and `migrate` containers receive the Compose-built URL, so the local
+`DATABASE_URL` value is not used by those containers.
+
+### 2. Build and start the stack
+
+```bash
+docker compose up -d --build
+```
+
+Compose starts the services in this order:
+
+1. `db` starts PostgreSQL 16 and must pass its `pg_isready` healthcheck.
+2. `migrate` runs `python -m alembic upgrade head` and exits after the schema is
+   current.
+3. `api` starts only after `migrate` completes successfully.
+
+After startup, open:
+
+- Swagger UI: <http://localhost:8000/docs>
+- ReDoc: <http://localhost:8000/redoc>
+- Health check: <http://localhost:8000/api/v1/health>
+
+### 3. Check service status and logs
+
+Include stopped one-shot services, such as `migrate`, when checking status:
+
+```bash
+docker compose ps -a
+```
+
+Useful log commands:
+
+```bash
+docker compose logs migrate
+docker compose logs -f api
+docker compose logs -f db
+```
+
+Press `Ctrl+C` to stop following logs; the containers continue running.
+
+### 4. Stop the stack without deleting data
+
+Stop the containers while keeping them available to restart:
+
+```bash
+docker compose stop
+```
+
+Or remove the containers and Compose network while preserving the database
+volume:
+
+```bash
+docker compose down
+```
+
+PostgreSQL stores its data in the named `postgres_data` volume mounted at
+`/var/lib/postgresql/data`. Both commands above preserve that volume. Running
+`docker compose down -v` deletes the volume and permanently removes the local
+database data; use it only when an intentional full reset is required.
 
 ## Local Development
 
@@ -142,9 +250,8 @@ pyproject.toml
 - A PostgreSQL instance
 - Git
 
-Docker can be used to start only the existing PostgreSQL service while the API
-runs locally. The full authenticated Docker workflow is pending a separate
-infrastructure pull request.
+Docker can also be used to start only PostgreSQL while Alembic and the API run
+directly on the host machine.
 
 ### 1. Create a virtual environment
 
@@ -193,7 +300,8 @@ macOS or Linux:
 cp .env.example .env
 ```
 
-Configure the local `.env` file without committing it:
+Configure the local `.env` file without committing it. Keep `DATABASE_URL`
+pointing to `localhost` for this host-based workflow:
 
 ```dotenv
 APP_NAME=ticket-api
@@ -202,11 +310,12 @@ DEBUG=false
 API_V1_PREFIX=/api/v1
 DATABASE_URL=postgresql+psycopg://<db-user>:<db-password>@localhost:5432/<db-name>
 JWT_SECRET_KEY=<long-random-secret>
-ACCESS_TOKEN_EXPIRE_MINUTES=30
 ```
 
 `JWT_SECRET_KEY` is required and must not contain a real production key in
-source control. Generate a development value locally, for example:
+source control. The application supports `ACCESS_TOKEN_EXPIRE_MINUTES` as an
+optional setting and defaults it to `30` when it is not set. Generate a
+development JWT secret locally, for example:
 
 ```bash
 python -c "import secrets; print(secrets.token_urlsafe(48))"
@@ -496,45 +605,21 @@ the current AnyIO plugin still uses an API scheduled for removal in Pytest 10.
 
 ## Continuous Integration
 
-The repository contains a basic GitHub Actions workflow at
-`.github/workflows/ci.yml`. It runs Pytest on:
+The GitHub Actions workflow at `.github/workflows/ci.yml` runs on:
 
 - Pushes to `main`
 - Pushes to `feat/**` branches
 - Pull requests targeting `main`
 
-The workflow installs `.[test]` and runs the full suite. This is test
-automation only; advanced deployment pipelines, Jenkins, Terraform, and cloud
-deployment are not implemented.
+It performs three jobs:
 
-## Docker Status
+- Installs `.[test]`, runs Ruff, and runs the complete unit test suite.
+- Starts an isolated PostgreSQL service, applies Alembic migrations, and runs
+  the schema integration test against `ticket_api_test`.
+- Builds the Docker image after the test jobs succeed.
 
-The current `main` branch already contains a basic Docker setup:
-
-- A Python application image
-- A PostgreSQL 16 service
-- Database health checks
-- A persistent PostgreSQL volume
-- API and database port mappings for local development
-
-The authentication work does **not** claim the pending Docker improvements.
-The following items belong to a separate Docker pull request:
-
-- Copying Alembic files into the application image
-- Automatically running `alembic upgrade head` before API startup
-- A dedicated Compose migration service
-- Final Compose wiring for the required `JWT_SECRET_KEY`
-- Updated full-stack Docker startup instructions
-
-Until that pull request is merged, the recommended authenticated development
-flow is:
-
-1. Start only PostgreSQL with `docker compose up -d db`.
-2. Configure `.env` locally.
-3. Run Alembic and FastAPI from the local virtual environment.
-
-Do not assume that the uncommitted local Docker enhancements are available on
-`main`.
+This is validation automation only; advanced deployment pipelines, Jenkins,
+Terraform, and cloud deployment are not implemented.
 
 ## Current Limitations and Roadmap
 
@@ -545,16 +630,14 @@ Not currently implemented:
 - Pagination and filtering
 - Refresh tokens and token revocation
 - Public admin bootstrap
-- Automated container migrations on `main`
 - Advanced CI/CD or deployment automation
 - Terraform, Jenkins, AWS, or another cloud deployment
 
 Planned follow-up work:
 
-1. Complete the dedicated Docker and Docker Compose pull request.
-2. Add incident management endpoints.
-3. Add pagination and filtering.
-4. Extend authentication lifecycle and operational tooling as needed.
+1. Add incident management endpoints.
+2. Add pagination and filtering.
+3. Extend authentication lifecycle and operational tooling as needed.
 
 ## Security Notes
 
