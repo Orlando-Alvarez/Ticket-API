@@ -42,4 +42,5 @@ class User(Base):
 
     reported_incidents: Mapped[list["Incident"]] = relationship(
         back_populates="reporter",
+        foreign_keys="Incident.reported_by_id",
     )

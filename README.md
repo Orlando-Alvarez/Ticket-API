@@ -23,6 +23,7 @@ local use.
 - Protection against unauthorized ownership and assignment changes
 - Incident reporting with reporter/admin access control
 - Paginated Incident listing with status and severity filters
+- Admin-only soft deletion with UTC timestamp and actor auditing
 - Pydantic request validation and consistent JSON errors
 - Automated tests with Pytest and FastAPI's `TestClient`
 - Basic GitHub Actions test workflow
@@ -60,6 +61,7 @@ on the ticket's `assignee_id` relationship.
 | Read a ticket | Requested or assigned tickets only | Any ticket |
 | Update normal fields | Requested or assigned tickets only | Any ticket |
 | Change `requester_id` or `assignee_id` | Denied | Allowed |
+| Soft-delete a ticket | Denied | Allowed |
 
 ### Incident permissions
 
@@ -70,6 +72,7 @@ on the ticket's `assignee_id` relationship.
 | Read an incident | Own reported incidents | Any incident |
 | Update title, description, or severity | Own reported incidents | Any incident |
 | Update status | Denied | Allowed |
+| Soft-delete an incident | Denied | Allowed |
 
 Incident reporters are always derived from the authenticated user and cannot be
 supplied or reassigned through the API.
@@ -132,6 +135,7 @@ alembic/
   versions/
     20260523_0001_create_initial_tables.py
     20261112_0002_constrain_and_index_incidents.py
+    445042e29bcb_add_soft_delete_fields_to_tickets_and_.py
 
 tests/
   integration/
@@ -372,6 +376,8 @@ The migrations create:
 
 The Incident migration also enforces supported status and severity values,
 adds database defaults, and creates an index for reporter-scoped pagination.
+The Soft Delete migration adds nullable `deleted_at` and `deleted_by_id`
+columns to Tickets and Incidents with foreign keys to `users.id`.
 
 Create a migration after changing SQLAlchemy models:
 
@@ -498,6 +504,7 @@ other users through the API.
 | `GET` | `/api/v1/tickets` | Related tickets for non-admin users; all tickets for admin |
 | `GET` | `/api/v1/tickets/{ticket_id}` | Requester, assignee, or admin |
 | `PATCH` | `/api/v1/tickets/{ticket_id}` | Requester, assignee, or admin; relationship fields are admin-only |
+| `DELETE` | `/api/v1/tickets/{ticket_id}` | Admin only; soft-deletes the ticket |
 
 ### Protected incident endpoints
 
@@ -507,6 +514,7 @@ other users through the API.
 | `GET` | `/api/v1/incidents` | Own incidents for reporters; all incidents for admins |
 | `GET` | `/api/v1/incidents/{incident_id}` | Reporter or admin |
 | `PATCH` | `/api/v1/incidents/{incident_id}` | Reporter or admin; status is admin-only |
+| `DELETE` | `/api/v1/incidents/{incident_id}` | Admin only; soft-deletes the incident |
 
 ## Ticket Examples
 
@@ -598,6 +606,16 @@ public filters are limited to `status` and `severity`.
 Supported severity values are `low`, `medium`, `high`, and `critical`.
 Supported status values are `open`, `investigating`, `resolved`, and `closed`.
 
+## Soft Delete Behavior
+
+Ticket and Incident DELETE endpoints return `204 No Content`. They retain the
+database row, store a timezone-aware UTC `deleted_at` value, and record the
+authenticated administrator in `deleted_by_id`.
+
+Deleted resources are excluded from detail, update, and list operations. A
+repeated DELETE and any subsequent GET or PATCH return `404 Not Found`.
+Restore, include-deleted, and hard-delete operations are not exposed.
+
 ## Validation and Error Responses
 
 Pydantic validates email addresses, password length, required fields, text
@@ -627,6 +645,7 @@ Validation failures include field details:
 
 Common status codes:
 
+- `204 No Content`: resource was soft-deleted successfully
 - `401 Unauthorized`: missing, invalid, or expired bearer token
 - `403 Forbidden`: authenticated user lacks permission or is inactive
 - `404 Not Found`: requested resource does not exist
@@ -651,7 +670,7 @@ python -m pytest
 Latest verified local result:
 
 ```text
-108 passed, 1 skipped
+122 passed, 2 skipped
 ```
 
 Coverage includes:
@@ -668,6 +687,8 @@ Coverage includes:
 - Allowed and denied requester, assignee, unrelated-user, and admin scenarios
 - Incident creation, ownership, reporter/admin authorization, and updates
 - Incident pagination, status and severity filtering, and database constraints
+- Ticket and Incident soft deletion, audit metadata, and visibility rules
+- PostgreSQL Soft Delete migration upgrade, downgrade, and reapplication
 - Regression tests for existing user and ticket behavior
 
 The test extra uses `httpx2`, which is compatible with the current
@@ -696,7 +717,7 @@ Terraform, and cloud deployment are not implemented.
 
 Not currently implemented:
 
-- DELETE endpoints
+- Restore, include-deleted, and hard-delete endpoints
 - Pagination and filtering for Ticket and User collections
 - Refresh tokens and token revocation
 - Public admin bootstrap
@@ -706,7 +727,7 @@ Not currently implemented:
 Planned follow-up work:
 
 1. Add pagination and filtering to the remaining collection endpoints.
-2. Define deletion, restoration, and audit requirements before adding DELETE.
+2. Define authorization and retention requirements before adding restoration.
 3. Extend authentication lifecycle and operational tooling as needed.
 
 ## Security Notes

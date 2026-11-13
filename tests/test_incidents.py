@@ -66,6 +66,7 @@ def test_incident_endpoints_require_authentication(
             f"/api/v1/incidents/{incident.id}",
             json={"severity": "high"},
         ),
+        client.delete(f"/api/v1/incidents/{incident.id}"),
     ]
 
     for response in responses:
@@ -452,3 +453,178 @@ def test_incident_update_rejects_whitespace_only_title():
 
     with pytest.raises(ValidationError):
         IncidentUpdate(title="   ")
+
+
+def test_admin_can_soft_delete_incident_and_preserve_database_row(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    reporter = create_user(db_session, "reporter@example.com")
+    admin = create_user(db_session, "admin@example.com", role="admin")
+    incident = create_incident_record(db_session, reporter)
+
+    response = client.delete(
+        f"/api/v1/incidents/{incident.id}",
+        headers=auth_headers(admin),
+    )
+
+    assert response.status_code == 204, response.text
+    assert response.content == b""
+    db_session.expire_all()
+    stored = db_session.get(Incident, incident.id)
+    assert stored is not None
+    assert stored.deleted_at is not None
+    assert stored.deleted_by_id == admin.id
+
+
+def test_non_admin_cannot_delete_incident(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    reporter = create_user(db_session, "reporter@example.com")
+    incident = create_incident_record(db_session, reporter)
+
+    response = client.delete(
+        f"/api/v1/incidents/{incident.id}",
+        headers=auth_headers(reporter),
+    )
+
+    assert response.status_code == 403
+    db_session.expire_all()
+    stored = db_session.get(Incident, incident.id)
+    assert stored is not None
+    assert stored.deleted_at is None
+    assert stored.deleted_by_id is None
+
+
+def test_delete_missing_or_already_deleted_incident_returns_not_found(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    reporter = create_user(db_session, "reporter@example.com")
+    admin = create_user(db_session, "admin@example.com", role="admin")
+    incident = create_incident_record(db_session, reporter)
+    headers = auth_headers(admin)
+
+    missing = client.delete("/api/v1/incidents/999", headers=headers)
+    first = client.delete(f"/api/v1/incidents/{incident.id}", headers=headers)
+    repeated = client.delete(f"/api/v1/incidents/{incident.id}", headers=headers)
+
+    assert missing.status_code == 404
+    assert missing.json()["error"]["message"] == "Incident not found."
+    assert first.status_code == 204
+    assert repeated.status_code == 404
+    assert repeated.json()["error"]["message"] == "Incident not found."
+
+
+def test_deleted_incident_is_hidden_from_detail_and_update_endpoints(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    reporter = create_user(db_session, "reporter@example.com")
+    admin = create_user(db_session, "admin@example.com", role="admin")
+    incident = create_incident_record(db_session, reporter)
+    admin_headers = auth_headers(admin)
+
+    deleted = client.delete(
+        f"/api/v1/incidents/{incident.id}",
+        headers=admin_headers,
+    )
+    assert deleted.status_code == 204
+
+    for actor in (reporter, admin):
+        headers = auth_headers(actor)
+        get_response = client.get(
+            f"/api/v1/incidents/{incident.id}",
+            headers=headers,
+        )
+        patch_response = client.patch(
+            f"/api/v1/incidents/{incident.id}",
+            json={"severity": "critical"},
+            headers=headers,
+        )
+
+        assert get_response.status_code == 404
+        assert patch_response.status_code == 404
+
+
+def test_incident_lists_filters_and_pagination_exclude_deleted_records(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    reporter = create_user(db_session, "reporter@example.com")
+    other = create_user(db_session, "other@example.com")
+    admin = create_user(db_session, "admin@example.com", role="admin")
+    first_active = create_incident_record(
+        db_session,
+        reporter,
+        title="First active",
+        severity="high",
+        status="open",
+    )
+    deleted = create_incident_record(
+        db_session,
+        reporter,
+        title="Deleted",
+        severity="high",
+        status="open",
+    )
+    second_active = create_incident_record(
+        db_session,
+        reporter,
+        title="Second active",
+        severity="low",
+        status="investigating",
+    )
+    other_active = create_incident_record(
+        db_session,
+        other,
+        title="Other active",
+        severity="high",
+        status="open",
+    )
+
+    delete_response = client.delete(
+        f"/api/v1/incidents/{deleted.id}",
+        headers=auth_headers(admin),
+    )
+    assert delete_response.status_code == 204
+
+    reporter_list = client.get(
+        "/api/v1/incidents",
+        headers=auth_headers(reporter),
+    )
+    filtered = client.get(
+        "/api/v1/incidents?status=open&severity=high",
+        headers=auth_headers(admin),
+    )
+    first_page = client.get(
+        "/api/v1/incidents?offset=0&limit=1",
+        headers=auth_headers(admin),
+    )
+    second_page = client.get(
+        "/api/v1/incidents?offset=1&limit=1",
+        headers=auth_headers(admin),
+    )
+
+    assert reporter_list.status_code == 200, reporter_list.text
+    assert reporter_list.json()["total"] == 2
+    assert {item["id"] for item in reporter_list.json()["items"]} == {
+        first_active.id,
+        second_active.id,
+    }
+    assert filtered.status_code == 200, filtered.text
+    assert filtered.json()["total"] == 2
+    assert {item["id"] for item in filtered.json()["items"]} == {
+        first_active.id,
+        other_active.id,
+    }
+    assert first_page.json()["total"] == 3
+    assert second_page.json()["total"] == 3
+    paged_ids = {
+        first_page.json()["items"][0]["id"],
+        second_page.json()["items"][0]["id"],
+    }
+    assert deleted.id not in paged_ids
+    assert second_active.id in paged_ids
+    assert other_active.id in paged_ids

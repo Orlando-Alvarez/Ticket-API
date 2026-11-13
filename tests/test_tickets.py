@@ -78,6 +78,7 @@ def test_ticket_endpoints_require_authentication(
             f"/api/v1/tickets/{ticket.id}",
             json={"status": "closed"},
         ),
+        client.delete(f"/api/v1/tickets/{ticket.id}"),
     ]
 
     for response in responses:
@@ -512,3 +513,130 @@ def test_patch_ticket_rejects_unknown_field(
     assert response.json()["error"]["details"][0]["loc"] == ["body", "priorty"]
     db_session.refresh(ticket)
     assert ticket.status == "open"
+
+
+def test_admin_can_soft_delete_ticket_and_preserve_database_row(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    admin = create_user(db_session, email="admin@example.com", role="admin")
+    requester = create_user(db_session)
+    ticket = create_ticket_record(db_session, requester)
+
+    response = client.delete(
+        f"/api/v1/tickets/{ticket.id}",
+        headers=auth_headers(admin),
+    )
+
+    assert response.status_code == 204, response.text
+    assert response.content == b""
+    db_session.expire_all()
+    stored = db_session.get(Ticket, ticket.id)
+    assert stored is not None
+    assert stored.deleted_at is not None
+    assert stored.deleted_by_id == admin.id
+
+
+@pytest.mark.parametrize("actor_kind", ["requester", "assignee"])
+def test_non_admin_cannot_delete_ticket(
+    client: TestClient,
+    db_session: Session,
+    actor_kind: str,
+) -> None:
+    requester = create_user(db_session, email="requester@example.com")
+    assignee = create_user(
+        db_session,
+        email="assignee@example.com",
+        role="assignee",
+    )
+    ticket = create_ticket_record(db_session, requester, assignee)
+    actor = requester if actor_kind == "requester" else assignee
+
+    response = client.delete(
+        f"/api/v1/tickets/{ticket.id}",
+        headers=auth_headers(actor),
+    )
+
+    assert response.status_code == 403
+    db_session.expire_all()
+    stored = db_session.get(Ticket, ticket.id)
+    assert stored is not None
+    assert stored.deleted_at is None
+    assert stored.deleted_by_id is None
+
+
+def test_delete_missing_or_already_deleted_ticket_returns_not_found(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    admin = create_user(db_session, email="admin@example.com", role="admin")
+    requester = create_user(db_session)
+    ticket = create_ticket_record(db_session, requester)
+    headers = auth_headers(admin)
+
+    missing = client.delete("/api/v1/tickets/999", headers=headers)
+    first = client.delete(f"/api/v1/tickets/{ticket.id}", headers=headers)
+    repeated = client.delete(f"/api/v1/tickets/{ticket.id}", headers=headers)
+
+    assert missing.status_code == 404
+    assert missing.json()["error"]["message"] == "Ticket not found."
+    assert first.status_code == 204
+    assert repeated.status_code == 404
+    assert repeated.json()["error"]["message"] == "Ticket not found."
+
+
+def test_deleted_ticket_is_hidden_while_active_ticket_remains_unchanged(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    admin = create_user(db_session, email="admin@example.com", role="admin")
+    requester = create_user(db_session, email="requester@example.com")
+    assignee = create_user(
+        db_session,
+        email="assignee@example.com",
+        role="assignee",
+    )
+    deleted = create_ticket_record(
+        db_session,
+        requester,
+        assignee,
+        title="Deleted ticket",
+    )
+    active = create_ticket_record(
+        db_session,
+        requester,
+        assignee,
+        title="Active ticket",
+    )
+    admin_headers = auth_headers(admin)
+
+    deleted_response = client.delete(
+        f"/api/v1/tickets/{deleted.id}",
+        headers=admin_headers,
+    )
+    assert deleted_response.status_code == 204
+
+    for actor in (admin, requester, assignee):
+        headers = auth_headers(actor)
+        get_response = client.get(f"/api/v1/tickets/{deleted.id}", headers=headers)
+        patch_response = client.patch(
+            f"/api/v1/tickets/{deleted.id}",
+            json={"status": "closed"},
+            headers=headers,
+        )
+        list_response = client.get("/api/v1/tickets", headers=headers)
+
+        assert get_response.status_code == 404
+        assert patch_response.status_code == 404
+        assert list_response.status_code == 200, list_response.text
+        returned_ids = {item["id"] for item in list_response.json()}
+        assert deleted.id not in returned_ids
+        assert active.id in returned_ids
+
+    active_response = client.get(
+        f"/api/v1/tickets/{active.id}",
+        headers=admin_headers,
+    )
+    assert active_response.status_code == 200, active_response.text
+    assert active_response.json()["title"] == "Active ticket"
+    assert active_response.json()["status"] == "open"
