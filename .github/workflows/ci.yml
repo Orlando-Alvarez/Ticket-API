@@ -70,3 +70,15 @@ jobs:
 
       - name: Run PostgreSQL integration tests
         run: python -m pytest tests/integration -v
+
+  docker:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    needs: [test, postgres]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Build Ticket-API image
+        run: docker build -t ticket-api:ci .
