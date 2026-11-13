@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.ticket import Ticket
@@ -19,6 +19,16 @@ def get_ticket(db: Session, ticket_id: int) -> Ticket | None:
 
 def get_tickets(db: Session) -> list[Ticket]:
     return list(db.scalars(select(Ticket)).all())
+
+
+def get_tickets_for_user(db: Session, user_id: int) -> list[Ticket]:
+    statement = select(Ticket).where(
+        or_(
+            Ticket.requester_id == user_id,
+            Ticket.assignee_id == user_id,
+        )
+    )
+    return list(db.scalars(statement).all())
 
 
 def update_ticket(db: Session, ticket: Ticket, ticket_in: TicketUpdate) -> Ticket:
