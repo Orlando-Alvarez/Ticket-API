@@ -23,3 +23,15 @@ def test_incident_defaults_and_reporter(db_session: Session) -> None:
     assert incident.severity == "medium"
     assert incident.description is None
     assert incident.created_at is not None
+
+
+def test_incident_table_has_constraints_defaults_and_listing_index() -> None:
+    table = Base.metadata.tables["incidents"]
+    constraint_names = {constraint.name for constraint in table.constraints}
+    index_names = {index.name for index in table.indexes}
+
+    assert "ck_incidents_severity" in constraint_names
+    assert "ck_incidents_status" in constraint_names
+    assert "ix_incidents_reported_by_created_id" in index_names
+    assert table.c.severity.server_default is not None
+    assert table.c.status.server_default is not None

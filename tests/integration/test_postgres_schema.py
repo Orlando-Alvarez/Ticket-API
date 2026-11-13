@@ -41,6 +41,23 @@ def test_postgres_has_required_tables() -> None:
             expected_tables - existing_tables
         )
 
+        incident_columns = {
+            column["name"]: column for column in inspector.get_columns("incidents")
+        }
+        incident_constraints = {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("incidents")
+        }
+        incident_indexes = {
+            index["name"] for index in inspector.get_indexes("incidents")
+        }
+
+        assert incident_columns["severity"]["default"] is not None
+        assert incident_columns["status"]["default"] is not None
+        assert "ck_incidents_severity" in incident_constraints
+        assert "ck_incidents_status" in incident_constraints
+        assert "ix_incidents_reported_by_created_id" in incident_indexes
+
     finally:
 
         engine.dispose()

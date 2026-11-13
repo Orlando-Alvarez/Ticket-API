@@ -4,6 +4,7 @@ services:
       context: .
     container_name: ticket-api
     environment:
+      APP_DEBUG: "${APP_DEBUG:-false}"
       DATABASE_URL: &database_url "postgresql+psycopg://${POSTGRES_USER:?required}:${POSTGRES_PASSWORD:?required}@db:5432/${POSTGRES_DB:?required}"
       JWT_SECRET_KEY: "${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}"
     ports:
