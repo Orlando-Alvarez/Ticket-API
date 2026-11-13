@@ -10,7 +10,8 @@ jobs:
   test:
     name: Run pytest
     runs-on: ubuntu-latest
-
+    env:
+      JWT_SECRET_KEY: "ci-test-key-only-not-for-production-123456789"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
