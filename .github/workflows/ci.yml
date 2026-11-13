@@ -47,7 +47,7 @@ jobs:
           POSTGRES_PASSWORD: test_only_password
           POSTGRES_DB: ticket_api_test
         ports:
-          - 5432:54322
+          - 5432:5432
         options: >-
           --health-cmd "pg_isready -U ticket_test -d ticket_api_test"
           --health-interval 10s
