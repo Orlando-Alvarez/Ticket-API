@@ -11,7 +11,6 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
 
-
 engine = create_engine(
     "sqlite://",
     connect_args={"check_same_thread": False},

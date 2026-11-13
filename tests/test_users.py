@@ -5,7 +5,6 @@ from sqlalchemy.orm import Session
 from app.core.security import create_access_token
 from app.models.user import User
 
-
 PASSWORD = "SecurePassword123!"
 
 

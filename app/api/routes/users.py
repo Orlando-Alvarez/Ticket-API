@@ -3,7 +3,13 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
 from app.core.security import get_current_user
-from app.crud.users import create_user, get_user, get_user_by_email, get_users, update_user
+from app.crud.users import (
+    create_user,
+    get_user,
+    get_user_by_email,
+    get_users,
+    update_user,
+)
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.user import UserCreate, UserResponse, UserUpdate

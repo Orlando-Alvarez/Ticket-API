@@ -4,7 +4,6 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from pydantic_core import PydanticCustomError
 
-
 UserText = Annotated[str, Field(min_length=1, max_length=255)]
 UserRole = Annotated[str, Field(min_length=1, max_length=50)]
 
