@@ -37,6 +37,16 @@ class Ticket(Base):
         nullable=True,
     )
 
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    deleted_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", name="fk_tickets_deleted_by_id_users"),
+        nullable=True,
+    )
+
     requester: Mapped["User"] = relationship(
         back_populates="requested_tickets",
         foreign_keys=[requester_id],

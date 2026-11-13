@@ -9,6 +9,7 @@ from app.crud.incidents import (
     create_incident,
     get_incident,
     get_incidents,
+    soft_delete_incident,
     update_incident,
 )
 from app.db.session import get_db
@@ -124,3 +125,26 @@ def update_incident_endpoint(
         )
 
     return update_incident(db, incident, incident_in)
+
+
+@router.delete(
+    "/incidents/{incident_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete incident",
+)
+def delete_incident_endpoint(
+    incident_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    if not _is_admin(current_user):
+        raise AppError(
+            "Only admins can delete incidents.",
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    if not soft_delete_incident(db, incident_id, current_user.id):
+        raise AppError(
+            "Incident not found.",
+            status.HTTP_404_NOT_FOUND,
+        )

@@ -62,6 +62,17 @@ class Incident(Base):
         nullable=True,
     )
 
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    deleted_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", name="fk_incidents_deleted_by_id_users"),
+        nullable=True,
+    )
+
     reporter: Mapped["User"] = relationship(
         back_populates="reported_incidents",
+        foreign_keys=[reported_by_id],
     )

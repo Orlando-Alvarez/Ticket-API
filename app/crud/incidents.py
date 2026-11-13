@@ -1,4 +1,6 @@
-from sqlalchemy import func, select
+from datetime import UTC, datetime
+
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.models.incident import Incident
@@ -26,7 +28,12 @@ def create_incident(
 
 
 def get_incident(db: Session, incident_id: int) -> Incident | None:
-    return db.get(Incident, incident_id)
+    statement = select(Incident).where(
+        Incident.id == incident_id,
+        Incident.deleted_at.is_(None),
+    )
+
+    return db.scalar(statement)
 
 
 def get_incidents(
@@ -38,7 +45,7 @@ def get_incidents(
     severity: IncidentSeverity | None = None,
     reporter_scope_id: int | None = None,
 ) -> tuple[list[Incident], int]:
-    filters = []
+    filters = [Incident.deleted_at.is_(None)]
     if status is not None:
         filters.append(Incident.status == status)
     if severity is not None:
@@ -74,3 +81,24 @@ def update_incident(
     db.commit()
     db.refresh(incident)
     return incident
+
+
+def soft_delete_incident(
+    db: Session,
+    incident_id: int,
+    deleted_by_id: int,
+) -> bool:
+    statement = (
+        update(Incident)
+        .where(
+            Incident.id == incident_id,
+            Incident.deleted_at.is_(None),
+        )
+        .values(
+            deleted_at=datetime.now(UTC),
+            deleted_by_id=deleted_by_id,
+        )
+    )
+    result = db.execute(statement)
+    db.commit()
+    return result.rowcount == 1

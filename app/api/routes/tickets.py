@@ -1,11 +1,9 @@
 """Ticket authorization policy.
 
-The project did not define ticket permissions, so these routes use a
-least-privilege policy: non-admin users create only for themselves without an
-initial assignment; they can read and update ordinary fields only on tickets
-they requested or are assigned to. Only admins can change requester or
-assignee relationships. Assignee access is based on the assignee_id relation,
-not solely on the user's global role.
+Non-admin users create tickets only for themselves without an initial
+assignment. They can read and update ordinary fields only on tickets they
+requested or are assigned to. Only admins can change requester or assignee
+relationships or delete tickets.
 """
 
 from fastapi import APIRouter, Depends, status
@@ -18,6 +16,7 @@ from app.crud.tickets import (
     get_ticket,
     get_tickets,
     get_tickets_for_user,
+    soft_delete_ticket,
     update_ticket,
 )
 from app.db.session import get_db
@@ -149,3 +148,26 @@ def update_ticket_endpoint(
 
     _validate_ticket_users(db, ticket_in.requester_id, ticket_in.assignee_id)
     return update_ticket(db, ticket, ticket_in)
+
+
+@router.delete(
+    "/tickets/{ticket_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete ticket",
+)
+def delete_ticket_endpoint(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    if not _is_admin(current_user):
+        raise AppError(
+            "Only admins can delete tickets.",
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    if not soft_delete_ticket(db, ticket_id, current_user.id):
+        raise AppError(
+            "Ticket not found.",
+            status.HTTP_404_NOT_FOUND,
+        )
