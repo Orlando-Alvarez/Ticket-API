@@ -21,6 +21,8 @@ local use.
 - User profile and administration endpoints
 - Ticket access based on `requester_id` and `assignee_id`
 - Protection against unauthorized ownership and assignment changes
+- Incident reporting with reporter/admin access control
+- Paginated Incident listing with status and severity filters
 - Pydantic request validation and consistent JSON errors
 - Automated tests with Pytest and FastAPI's `TestClient`
 - Basic GitHub Actions test workflow
@@ -34,7 +36,7 @@ privileges.
 The application currently recognizes these effective roles:
 
 - **requester**: the default account role
-- **admin**: can list and update users and manage every ticket
+- **admin**: can list and update users and manage every ticket and incident
 
 An assignee is not a separate RBAC role. Ticket access as an assignee is based
 on the ticket's `assignee_id` relationship.
@@ -58,6 +60,19 @@ on the ticket's `assignee_id` relationship.
 | Read a ticket | Requested or assigned tickets only | Any ticket |
 | Update normal fields | Requested or assigned tickets only | Any ticket |
 | Change `requester_id` or `assignee_id` | Denied | Allowed |
+
+### Incident permissions
+
+| Operation | Reporter | Admin |
+| --- | --- | --- |
+| Create an incident | For self | For self |
+| List incidents | Own reported incidents | All incidents |
+| Read an incident | Own reported incidents | Any incident |
+| Update title, description, or severity | Own reported incidents | Any incident |
+| Update status | Denied | Allowed |
+
+Incident reporters are always derived from the authenticated user and cannot be
+supplied or reassigned through the API.
 
 Inactive users cannot log in or access protected endpoints.
 
@@ -84,6 +99,7 @@ app/
     routes/
       auth.py
       health.py
+      incidents.py
       tickets.py
       users.py
     router.py
@@ -92,6 +108,7 @@ app/
     errors.py
     security.py
   crud/
+    incidents.py
     tickets.py
     users.py
   db/
@@ -104,6 +121,7 @@ app/
   schemas/
     auth.py
     health.py
+    incident.py
     ticket.py
     user.py
   main.py
@@ -113,6 +131,7 @@ alembic/
   script.py.mako
   versions/
     20260523_0001_create_initial_tables.py
+    20261112_0002_constrain_and_index_incidents.py
 
 tests/
   integration/
@@ -121,6 +140,7 @@ tests/
   test_auth.py
   test_database_config.py
   test_health.py
+  test_incidents.py
   test_models.py
   test_tickets.py
   test_users.py
@@ -306,7 +326,7 @@ pointing to `localhost` for this host-based workflow:
 ```dotenv
 APP_NAME=ticket-api
 APP_VERSION=0.1.0
-DEBUG=false
+APP_DEBUG=false
 API_V1_PREFIX=/api/v1
 DATABASE_URL=postgresql+psycopg://<db-user>:<db-password>@localhost:5432/<db-name>
 JWT_SECRET_KEY=<long-random-secret>
@@ -320,6 +340,10 @@ development JWT secret locally, for example:
 ```bash
 python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
+
+`APP_DEBUG` controls FastAPI debug mode and defaults to `false`. The
+application ignores Compose-only `POSTGRES_*` entries when reading the shared
+local `.env` file.
 
 ### 4. Start PostgreSQL
 
@@ -339,12 +363,15 @@ When the API runs from the host machine, `DATABASE_URL` must use
 python -m alembic upgrade head
 ```
 
-The initial migration creates:
+The migrations create:
 
 - `users`
 - `tickets`
 - `incidents`
 - `alembic_version`
+
+The Incident migration also enforces supported status and severity values,
+adds database defaults, and creates an index for reporter-scoped pagination.
 
 Create a migration after changing SQLAlchemy models:
 
@@ -472,6 +499,15 @@ other users through the API.
 | `GET` | `/api/v1/tickets/{ticket_id}` | Requester, assignee, or admin |
 | `PATCH` | `/api/v1/tickets/{ticket_id}` | Requester, assignee, or admin; relationship fields are admin-only |
 
+### Protected incident endpoints
+
+| Method | Path | Access |
+| --- | --- | --- |
+| `POST` | `/api/v1/incidents` | Authenticated user; reporter is derived from the JWT |
+| `GET` | `/api/v1/incidents` | Own incidents for reporters; all incidents for admins |
+| `GET` | `/api/v1/incidents/{incident_id}` | Reporter or admin |
+| `PATCH` | `/api/v1/incidents/{incident_id}` | Reporter or admin; status is admin-only |
+
 ## Ticket Examples
 
 ### Create a ticket as a requester
@@ -530,10 +566,43 @@ curl -X PATCH "http://127.0.0.1:8000/api/v1/tickets/1" \
 
 Only admins can change `requester_id` or `assignee_id`.
 
+## Incident Examples
+
+### Create an incident
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/incidents" \
+  -H "Authorization: Bearer <jwt-access-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Payment service unavailable",
+    "description": "Customers cannot complete checkout.",
+    "severity": "high"
+  }'
+```
+
+The API does not accept ownership input: `reported_by_id` and initial `status`
+are server-controlled fields and are rejected if supplied.
+
+### List accessible incidents
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/incidents?status=open&severity=high&offset=0&limit=50" \
+  -H "Authorization: Bearer <jwt-access-token>"
+```
+
+The response contains `items`, `total`, `offset`, and `limit`. Non-admin users
+receive only their own incidents; admins receive all matching incidents. The
+public filters are limited to `status` and `severity`.
+
+Supported severity values are `low`, `medium`, `high`, and `critical`.
+Supported status values are `open`, `investigating`, `resolved`, and `closed`.
+
 ## Validation and Error Responses
 
 Pydantic validates email addresses, password length, required fields, text
-boundaries, explicit null values, and unknown PATCH fields.
+boundaries, controlled Incident values, pagination parameters, explicit null
+values, and unknown fields.
 
 Application errors use a consistent envelope:
 
@@ -582,7 +651,7 @@ python -m pytest
 Latest verified local result:
 
 ```text
-78 passed
+108 passed, 1 skipped
 ```
 
 Coverage includes:
@@ -597,6 +666,8 @@ Coverage includes:
 - Authentication requirements for every ticket endpoint
 - Ticket creation, ownership, assignment, listing, reading, and updates
 - Allowed and denied requester, assignee, unrelated-user, and admin scenarios
+- Incident creation, ownership, reporter/admin authorization, and updates
+- Incident pagination, status and severity filtering, and database constraints
 - Regression tests for existing user and ticket behavior
 
 The test extra uses `httpx2`, which is compatible with the current
@@ -625,9 +696,8 @@ Terraform, and cloud deployment are not implemented.
 
 Not currently implemented:
 
-- Incident CRUD endpoints
 - DELETE endpoints
-- Pagination and filtering
+- Pagination and filtering for Ticket and User collections
 - Refresh tokens and token revocation
 - Public admin bootstrap
 - Advanced CI/CD or deployment automation
@@ -635,8 +705,8 @@ Not currently implemented:
 
 Planned follow-up work:
 
-1. Add incident management endpoints.
-2. Add pagination and filtering.
+1. Add pagination and filtering to the remaining collection endpoints.
+2. Define deletion, restoration, and audit requirements before adding DELETE.
 3. Extend authentication lifecycle and operational tooling as needed.
 
 ## Security Notes
