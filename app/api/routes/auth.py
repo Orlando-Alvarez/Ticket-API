@@ -14,7 +14,6 @@ from app.crud.users import get_user_by_email
 from app.db.session import get_db
 from app.schemas.auth import Token
 
-
 router = APIRouter()
 
 

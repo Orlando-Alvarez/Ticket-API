@@ -4,7 +4,6 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_core import PydanticCustomError
 
-
 TicketTitle = Annotated[str, Field(min_length=1, max_length=200)]
 TicketLabel = Annotated[str, Field(min_length=1, max_length=50)]
 

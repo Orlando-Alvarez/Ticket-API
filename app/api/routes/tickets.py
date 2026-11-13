@@ -25,7 +25,6 @@ from app.models.ticket import Ticket
 from app.models.user import User
 from app.schemas.ticket import TicketCreate, TicketResponse, TicketUpdate
 
-
 router = APIRouter()
 
 

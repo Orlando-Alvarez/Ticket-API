@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.security import ALGORITHM, create_access_token, decode_token
 from app.models.user import User
-
 
 PASSWORD = "SecurePassword123!"
 
@@ -65,7 +64,7 @@ def test_get_current_user_with_invalid_signature(client: TestClient) -> None:
     invalid_token = jwt.encode(
         {
             "sub": "1",
-            "exp": datetime.now(timezone.utc) + timedelta(minutes=30),
+            "exp": datetime.now(UTC) + timedelta(minutes=30),
         },
         "wrong-secret-for-testing-only-123456789",
         algorithm=ALGORITHM,
@@ -85,7 +84,7 @@ def test_get_current_user_with_expired_token(client: TestClient) -> None:
     expired_token = encode_payload(
         {
             "sub": "1",
-            "exp": datetime.now(timezone.utc) - timedelta(minutes=1),
+            "exp": datetime.now(UTC) - timedelta(minutes=1),
         }
     )
 
@@ -122,7 +121,7 @@ def test_get_current_user_rejects_invalid_subject(
     token = encode_payload(
         {
             "sub": subject,
-            "exp": datetime.now(timezone.utc) + timedelta(minutes=30),
+            "exp": datetime.now(UTC) + timedelta(minutes=30),
         }
     )
 
