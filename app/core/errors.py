@@ -27,6 +27,7 @@ async def http_error_handler(_: Request, exc: StarletteHTTPException) -> JSONRes
     return JSONResponse(
         status_code=exc.status_code,
         content=_error_payload(message),
+        headers=exc.headers
     )
 
 

@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
+from app.core.security import get_current_user
 from app.crud.users import create_user, get_user, get_user_by_email, get_users, update_user
 from app.db.session import get_db
 from app.models.user import User
@@ -18,7 +19,6 @@ def _validate_unique_email(db: Session, email: str, current_user: User | None = 
     ):
         raise AppError("Email already exists.", status.HTTP_409_CONFLICT)
 
-
 @router.post(
     "/users",
     response_model=UserResponse,
@@ -32,15 +32,33 @@ def create_user_endpoint(
     _validate_unique_email(db, user_in.email)
     return create_user(db, user_in)
 
-
 @router.get(
     "/users",
     response_model=list[UserResponse],
     summary="List users",
 )
-def list_users_endpoint(db: Session = Depends(get_db)) -> list[UserResponse]:
+def list_users_endpoint(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[UserResponse]:
+
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required",
+        )
+
     return get_users(db)
 
+
+@router.get("/users/me",
+            response_model=UserResponse,
+            summary= "Get current authenticated user"
+)
+def read_current_user(
+    current_user: User = Depends(get_current_user)
+) -> User:
+    return current_user
 
 @router.get(
     "/users/{user_id}",
@@ -50,14 +68,20 @@ def list_users_endpoint(db: Session = Depends(get_db)) -> list[UserResponse]:
 def get_user_endpoint(
     user_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> UserResponse:
     user = get_user(db, user_id)
+
+    if current_user.role != "admin" and current_user.id != user_id:
+        raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="You are not authorized to view this user",
+    )
 
     if user is None:
         raise AppError("User not found.", status.HTTP_404_NOT_FOUND)
 
     return user
-
 
 @router.patch(
     "/users/{user_id}",
@@ -68,8 +92,15 @@ def update_user_endpoint(
     user_id: int,
     user_in: UserUpdate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ) -> UserResponse:
     user = get_user(db, user_id)
+
+    if current_user.role != "admin":
+        raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail= "Admin privileges required"
+    )
 
     if user is None:
         raise AppError("User not found.", status.HTTP_404_NOT_FOUND)

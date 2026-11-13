@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from pydantic_core import PydanticCustomError
 
 
@@ -17,22 +17,23 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    email: UserText
+    email: EmailStr
     full_name: UserText
-    role: UserRole = "requester"
-    hashed_password: UserText
+    password: str = Field(min_length=8, max_length=128)
 
 
 class UserUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    email: UserText | None = None
+    email: EmailStr | None = None
     full_name: UserText | None = None
-    hashed_password: UserText | None = None
     role: UserRole | None = None
     is_active: bool | None = None
 
-    @field_validator("email", "full_name", "hashed_password", "role", "is_active")
+    @field_validator("email",
+                     "full_name",
+                     "role",
+                     "is_active")
     @classmethod
     def reject_null(cls, value: str | bool | None) -> str | bool:
         if value is None:

@@ -1,4 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import SecretStr
+
 
 
 class Settings(BaseSettings):
@@ -15,6 +17,8 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql+psycopg://ticket_user:ticket_password@localhost:5432/ticket_api"
     )
+    jwt_secret_key: SecretStr
+    access_token_expire_minutes: int = 30
 
 
 settings = Settings()
