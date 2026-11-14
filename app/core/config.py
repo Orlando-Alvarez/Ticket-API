@@ -14,9 +14,7 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     debug: bool = Field(default=False, validation_alias="APP_DEBUG")
     api_v1_prefix: str = "/api/v1"
-    database_url: str = (
-        "postgresql+psycopg://ticket_user:ticket_password@localhost:5432/ticket_api"
-    )
+    database_url: str = Field(validation_alias="DATABASE_URL")
     jwt_secret_key: SecretStr
     access_token_expire_minutes: int = 30
 

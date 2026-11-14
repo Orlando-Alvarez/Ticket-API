@@ -1,0 +1,13 @@
+
+services:
+  api:
+    environment:
+      APP_DEBUG: "false"
+    ports: !reset []
+
+  db:
+    ports: !reset []
+
+  nginx:
+    ports: !override
+      - "80:80"

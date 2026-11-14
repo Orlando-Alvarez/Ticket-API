@@ -7,11 +7,18 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY app ./app
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip \
+    && python -m pip install .
+
 COPY alembic.ini ./
 COPY alembic ./alembic
 
-RUN python -m pip install --upgrade pip \
-    && python -m pip install --no-cache-dir -e .
+RUN groupadd --system appgroup \
+    && useradd --system --gid appgroup --create-home appuser
+
+USER appuser
 
 EXPOSE 8000
 

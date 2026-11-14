@@ -12,6 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       JWT_SECRET_KEY: "ci-test-key-only-not-for-production-123456789"
+      DATABASE_URL: "postgresql+psycopg://ci_placeholder:ci_placeholder@127.0.0.1:65432/ci_unit_placeholder"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -31,7 +32,7 @@ jobs:
         run: python -m ruff check app tests
 
       - name: Run tests
-        run: python -m pytest
+        run: python -m pytest --ignore=tests/integration
 
   postgres:
     name: PostgreSQL integration tests
