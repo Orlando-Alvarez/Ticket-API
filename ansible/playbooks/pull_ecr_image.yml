@@ -1,0 +1,69 @@
+
+---
+- name: Pull Ticket-API image from Amazon ECR
+  hosts: ticket_api
+  become: true
+  gather_facts: false
+
+  vars:
+    aws_region: "us-west-2"
+    ecr_registry: "891920435362.dkr.ecr.us-west-2.amazonaws.com"
+    image_reference: "{{ ecr_registry }}/ticket-api@{{ image_digest }}"
+
+  tasks:
+    - name: Validate image digest
+      ansible.builtin.assert:
+        that:
+          - image_digest is defined
+          - (image_digest | default('')) is match('^sha256:[0-9a-f]{64}$')
+
+    - name: Check whether image already exists
+      ansible.builtin.command:
+        argv:
+          - docker
+          - image
+          - inspect
+          - "{{ image_reference }}"
+      register: local_image
+      failed_when: false
+      changed_when: false
+
+    - name: Authenticate and download missing image
+      when: local_image.rc != 0
+      block:
+        - name: Login to Amazon ECR
+          ansible.builtin.shell: |
+            set -o pipefail
+            aws ecr get-login-password --region {{ aws_region | quote }} |
+              docker login --username AWS --password-stdin {{ ecr_registry | quote }}
+          args:
+            executable: /bin/bash
+          changed_when: false
+          no_log: true
+
+        - name: Pull Docker image
+          ansible.builtin.command:
+            argv:
+              - docker
+              - pull
+              - "{{ image_reference }}"
+
+      always:
+        - name: Remove temporary ECR authentication
+          ansible.builtin.command:
+            argv:
+              - docker
+              - logout
+              - "{{ ecr_registry }}"
+          changed_when: false
+          failed_when: false
+          no_log: true
+
+    - name: Verify image is available
+      ansible.builtin.command:
+        argv:
+          - docker
+          - image
+          - inspect
+          - "{{ image_reference }}"
+      changed_when: false
