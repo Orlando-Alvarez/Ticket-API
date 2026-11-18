@@ -30,3 +30,8 @@ resource "aws_iam_instance_profile" "ec2" {
   name = "${var.project_name}-${var.environment}-ec2-profile"
   role = aws_iam_role.ec2.name
 }
+
+resource "aws_iam_role_policy_attachment" "ecr_pull" {
+  role       = aws_iam_role.ec2.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPullOnly"
+}
