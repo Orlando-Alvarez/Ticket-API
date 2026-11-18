@@ -1,0 +1,43 @@
+---
+- name: Install Docker Compose on Ticket-API EC2
+  hosts: ticket_api
+  become: true
+
+  vars:
+    docker_compose_version: "v2.39.4"
+    docker_compose_dir: "/usr/local/lib/docker/cli-plugins"
+    docker_compose_sha256: "7af95166a730b87e172d4fc9aefea8725d3c6c7327d59149267b452114ddb7d4"
+
+  tasks:
+    - name: Verify EC2 architecture
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['architecture'] == 'x86_64'
+        fail_msg: "This playbook requires x86_64 architecture"
+
+    - name: Create Docker CLI plugins directory
+      ansible.builtin.file:
+        path: "{{ docker_compose_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install Docker Compose plugin
+      ansible.builtin.get_url:
+        url: "https://github.com/docker/compose/releases/download/{{ docker_compose_version }}/docker-compose-linux-x86_64"
+        dest: "{{ docker_compose_dir }}/docker-compose"
+        owner: root
+        group: root
+        mode: "0755"
+        checksum: "sha256:{{ docker_compose_sha256 }}"
+
+    - name: Verify Docker Compose installation
+      ansible.builtin.command:
+        cmd: docker compose version
+      register: compose_version
+      changed_when: false
+
+    - name: Display Docker Compose version
+      ansible.builtin.debug:
+        msg: "{{ compose_version.stdout }}"
