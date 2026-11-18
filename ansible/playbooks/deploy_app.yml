@@ -1,0 +1,162 @@
+
+---
+- import_playbook: pull_ecr_image.yml
+
+- name: Deploy Ticket-API to AWS EC2
+  hosts: ticket_api
+  become: true
+  gather_facts: false
+
+  vars:
+    deploy_dir: "/opt/ticket-api"
+    ecr_registry: "891920435362.dkr.ecr.us-west-2.amazonaws.com"
+    ticket_api_image: "{{ ecr_registry }}/ticket-api@{{ image_digest }}"
+
+    compose_files:
+      - docker-compose.yml
+      - compose.prod.yaml
+      - compose.aws.yaml
+
+  tasks:
+    - name: Create application directory
+      ansible.builtin.file:
+        path: "{{ deploy_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Create Nginx configuration directory
+      ansible.builtin.file:
+        path: "{{ deploy_dir }}/nginx"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Copy deployment configuration files
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../{{ item }}"
+        dest: "{{ deploy_dir }}/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - docker-compose.yml
+        - compose.prod.yaml
+        - compose.aws.yaml
+        - nginx/default.conf
+
+    - name: Check existing environment file
+      ansible.builtin.stat:
+        path: "{{ deploy_dir }}/.env"
+        get_checksum: false
+      register: deployment_env
+
+    - name: Check existing PostgreSQL volume
+      ansible.builtin.command:
+        argv:
+          - docker
+          - volume
+          - inspect
+          - ticket-api_postgres_data
+      register: database_volume
+      changed_when: false
+      failed_when: false
+
+    - name: Prevent accidental secret replacement
+      ansible.builtin.assert:
+        that:
+          - deployment_env.stat.exists or database_volume.rc != 0
+        fail_msg: >-
+          PostgreSQL data already exists but the .env file is missing.
+          Restore the original credentials before deploying.
+
+    - name: Generate initial deployment secrets on EC2
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import os
+            import secrets
+            from pathlib import Path
+
+            path = Path("/opt/ticket-api/.env")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            fd = os.open(str(path), flags, 0o600)
+
+            with os.fdopen(fd, "w", encoding="utf-8") as env:
+                env.write(
+                    "POSTGRES_USER=ticket_user\n"
+                    + f"POSTGRES_PASSWORD={secrets.token_urlsafe(36)}\n"
+                    + "POSTGRES_DB=ticket_api\n"
+                    + f"JWT_SECRET_KEY={secrets.token_urlsafe(48)}\n"
+                    + "APP_DEBUG=false\n"
+                )
+        creates: "{{ deploy_dir }}/.env"
+      no_log: true
+
+    - name: Enforce environment file permissions
+      ansible.builtin.file:
+        path: "{{ deploy_dir }}/.env"
+        state: file
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Validate combined Docker Compose configuration
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - -f
+          - docker-compose.yml
+          - -f
+          - compose.prod.yaml
+          - -f
+          - compose.aws.yaml
+          - config
+          - --quiet
+        chdir: "{{ deploy_dir }}"
+      environment:
+        TICKET_API_IMAGE: "{{ ticket_api_image }}"
+      changed_when: false
+      no_log: true
+
+    - name: Start Ticket-API application stack
+      community.docker.docker_compose_v2:
+        project_src: "{{ deploy_dir }}"
+        project_name: ticket-api
+        files: "{{ compose_files }}"
+        state: present
+        build: never
+        pull: policy
+        recreate: auto
+      environment:
+        TICKET_API_IMAGE: "{{ ticket_api_image }}"
+      register: deployment_result
+    
+
+    - name: Show Docker Compose actions
+      ansible.builtin.debug:
+        var: deployment_result.actions
+
+    - name: Verify API database readiness
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:8080/api/v1/health/ready"
+        method: GET
+        status_code: 200
+        timeout: 5
+      register: api_readiness
+      retries: 15
+      delay: 5
+      until: api_readiness.status == 200
+      changed_when: false
+
+    - name: Display deployment status
+      ansible.builtin.debug:
+        msg:
+          - "Ticket-API deployment completed."
+          - "Compose changed: {{ deployment_result.changed }}"
+          - "Readiness endpoint returned HTTP {{ api_readiness.status }}"
