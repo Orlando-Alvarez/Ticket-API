@@ -19,47 +19,50 @@ DevOps/Cloud Engineering skills. It does not include a frontend.
 | Local containers | Implemented | FastAPI, PostgreSQL, Alembic migrations, and Nginx through Docker Compose |
 | CI validation | Implemented | Ruff, unit tests, PostgreSQL integration tests, and Docker image build |
 | AWS infrastructure | Provisioned | VPC, public/private subnets, routing, security group, EC2, IAM/SSM integration, and private S3 bucket |
-| EC2 configuration | Implemented | Docker Engine installed and enabled through Ansible over AWS Systems Manager |
-| Application deployment to EC2 | In development | Docker Compose is not yet installed on EC2 and Ticket-API is not yet deployed there |
+| EC2 configuration | Implemented and operator-verified | Docker Engine 25.0.14 and Docker Compose v2.39.4 installed idempotently through Ansible over AWS Systems Manager |
+| Application deployment to EC2 | In development | The container runtime is ready, but Ticket-API has not yet been started or health-checked on EC2 |
 | Continuous deployment | Roadmap | Jenkins-based deployment automation has not been implemented |
 | Production observability | Roadmap | Prometheus, Grafana, dashboards, alerts, and centralized observability have not been implemented |
 | HTTPS | Roadmap | The current Nginx configuration serves HTTP only |
 
-## Features
+## Quick Start
 
-### Backend
+The fastest supported path is the local Docker Compose environment.
 
-- Versioned routes under `/api/v1`
-- FastAPI-generated OpenAPI schema, Swagger UI, and ReDoc
-- PostgreSQL persistence through SQLAlchemy 2 and psycopg 3
-- Alembic migrations for users, tickets, incidents, constraints, indexes, and
-  soft-delete audit fields
-- Public requester registration with Argon2 password hashing
-- OAuth2 password flow with HS256 JWT access tokens
-- `requester` and `admin` authorization policies
-- Ticket access based on requester and assignee relationships
-- Incident access based on the authenticated reporter
-- Incident pagination with `offset` and `limit`
-- Incident filtering by `status` and `severity`
-- Admin-only atomic soft deletion for tickets and incidents
-- Consistent JSON error envelopes and Pydantic request validation
-- Liveness and database readiness endpoints
+1. Create a local environment file:
 
-### DevOps and Cloud
+   ```powershell
+   Copy-Item .env.example .env
+   ```
 
-- Non-root FastAPI container based on `python:3.12-slim`
-- Local Docker Compose orchestration with service health checks and an
-  automatic Alembic migration job
-- Separate base and production-like Compose configurations
-- Nginx reverse proxy with rate limiting, upstream timeouts, and operational
-  access logs
-- GitHub Actions jobs for static analysis, API tests, PostgreSQL integration,
-  and Docker image construction
-- AWS networking, compute, IAM, Systems Manager, and S3 resources managed with
-  Terraform
-- SSH-free EC2 configuration through the
-  `amazon.aws.aws_ssm` Ansible connection plugin
-- Idempotent Docker Engine installation on Amazon Linux 2023
+   On macOS, Linux, or Ubuntu WSL, use `cp .env.example .env`.
+
+2. Replace the placeholder database password and `JWT_SECRET_KEY` in `.env`.
+
+3. Build and start PostgreSQL, migrations, FastAPI, and Nginx:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+4. Open Swagger UI at <http://127.0.0.1:8080/docs> or check readiness at
+   <http://127.0.0.1:8080/api/v1/health/ready>.
+
+Use `docker compose ps -a` to inspect the one-shot migration service and
+`docker compose down` to remove containers while preserving database data.
+
+## Verified Capabilities
+
+- Versioned FastAPI endpoints for users, JWT authentication, tickets,
+  incidents, liveness, and database readiness
+- Pydantic validation, role and relationship-based authorization, PostgreSQL
+  persistence, Alembic migrations, and atomic soft deletion
+- A non-root API image, health-aware local Compose stack, Nginx reverse proxy,
+  persistent database volume, and CI validation
+- Terraform-managed AWS networking, EC2, IAM/SSM integration, and private S3
+  transfer storage
+- SSH-free, idempotent Docker Engine and Docker Compose configuration on Amazon
+  Linux 2023 through Ansible
 
 ## Technology Stack
 
@@ -82,6 +85,33 @@ DevOps/Cloud Engineering skills. It does not include a frontend.
 | AWS | VPC, EC2, IAM, SSM, and S3 | Network, compute, access control, remote management, and temporary Ansible transfer storage |
 
 ## Architecture
+
+### Backend application architecture
+
+```mermaid
+flowchart LR
+    Client[API client] --> Router[Versioned FastAPI routers]
+    Router --> Validation[Pydantic schemas]
+    Router --> Auth[JWT and authorization dependencies]
+    Router --> CRUD[CRUD modules]
+    Router -. exceptions .-> Errors[Global exception handlers]
+    CRUD --> ORM[SQLAlchemy ORM]
+    ORM --> DB[(PostgreSQL)]
+    Alembic[Alembic migrations] --> DB
+    Errors --> Client
+```
+
+`app/api/routes` defines HTTP contracts and enforces the current authorization
+rules. Pydantic schemas validate inputs and shape responses, while `app/crud`
+contains database reads and writes through SQLAlchemy sessions. The repository
+does not currently have a separate service layer; business authorization is
+kept in the route modules and persistence logic in CRUD modules. Central
+exception handlers normalize application, HTTP, validation, and unexpected
+errors.
+
+Most API tests replace the production database dependency with an in-memory
+SQLite session. The dedicated integration tests use an isolated PostgreSQL
+database to validate the real schema and Alembic migration behavior.
 
 ### Local Docker architecture
 
@@ -136,7 +166,7 @@ flowchart TB
     VPC --> Private[Private subnet<br/>10.20.2.0/24]
     Internet[Internet] --> IGW[Internet Gateway]
     IGW --> Public
-    Public --> EC2[Amazon Linux 2023 EC2<br/>Docker Engine installed]
+    Public --> EC2[Amazon Linux 2023 EC2<br/>Docker Engine and Compose installed]
     EC2 --> Profile[IAM instance profile]
     Profile --> SSM[AWS Systems Manager]
     WSL[Ubuntu WSL<br/>Ansible with ticketapi-dev] --> SSM
@@ -148,47 +178,52 @@ and accepts inbound HTTP on port 80. Port 22 is not opened; administration uses
 AWS Systems Manager. The private subnet and its route table exist but currently
 host no project workload and have no NAT or Internet Gateway default route.
 
-Docker Engine 25.0.14 has been installed on EC2 through Ansible. Docker Compose
-and the Ticket-API application stack have not yet been installed or deployed on
-that instance.
+Docker Engine 25.0.14 and Docker Compose v2.39.4 have been installed on EC2
+through separate Ansible playbooks. The Ticket-API application stack has not
+yet been deployed or verified on that instance.
+
+### Planned deployment architecture
+
+The next milestone is to run the existing Compose stack on the configured EC2
+host. The intended flow is shown separately because it is not implemented yet:
+
+```mermaid
+flowchart LR
+    CI[Future release pipeline] -. planned image or artifact delivery .-> EC2[EC2 with Docker and Compose]
+    Secrets[Future deployment secrets mechanism] -. planned configuration .-> EC2
+    Internet[HTTPS client] -. planned TLS ingress .-> Nginx
+    EC2 -. planned runtime .-> Nginx
+    Nginx -.-> API[FastAPI]
+    API -.-> DB[(PostgreSQL container)]
+    Metrics[Future monitoring and alerting] -. planned telemetry .-> API
+```
+
+Image publishing, deployment secrets, application startup, HTTPS, and
+monitoring remain design and implementation work. The diagram does not
+represent a currently running AWS application deployment.
 
 ## Project Structure
 
 ```text
 app/
-  api/
-    routes/                 # Auth, health, users, tickets, and incidents
-    router.py               # Versioned router registration
-  core/
-    config.py               # Environment-backed application settings
-    errors.py               # Global exception handlers
-    security.py             # Password hashing, JWTs, and current-user dependency
-  crud/                     # Database queries and write operations
-  db/                       # SQLAlchemy base, engine, and session dependency
-  models/                   # User, Ticket, and Incident ORM models
-  schemas/                  # Pydantic request and response models
+  api/routes/               # Auth, health, users, tickets, and incidents
+  core/                     # Settings, security, and exception handlers
+  crud/                     # SQLAlchemy reads and writes
+  db/                       # Engine, session dependency, and declarative base
+  models/                   # User, Ticket, and Incident mappings
+  schemas/                  # Pydantic request and response contracts
   main.py                   # FastAPI application factory
 
-alembic/
-  versions/                 # Initial schema, Incident constraints, and soft delete
-
-tests/
-  integration/              # PostgreSQL schema and migration round-trip tests
-  conftest.py               # SQLite test database and FastAPI client fixtures
-  test_*.py                 # API, authorization, validation, and model tests
+alembic/versions/           # Schema, Incident constraints, and soft-delete migrations
+tests/                      # SQLite API tests and PostgreSQL integration tests
 
 terraform/
-  compute.tf                # EC2 instance and storage configuration
-  iam.tf                    # EC2 SSM role and instance profile
-  main.tf                   # VPC, subnets, Internet Gateway, and route tables
-  providers.tf              # AWS provider configuration
-  s3.tf                     # Private temporary-transfer bucket for Ansible
-  security.tf               # HTTP ingress and outbound rules
-  variables.tf              # Region, CIDRs, instance type, and pinned AMI input
-  versions.tf               # Terraform and AWS provider constraints
+  *.tf                      # Network, EC2, IAM, security, S3, and provider configuration
+  terraform.tfvars.example  # Placeholder-only AMI variable template
 
 ansible/
   Inventory/hosts.yml       # Static EC2 inventory using the SSM connection plugin
+  playbooks/install_compose.yml
   playbooks/setup_docker.yml
 
 .github/workflows/ci.yml
@@ -315,21 +350,8 @@ connection details.
 
 ### Environment configuration
 
-Create a local environment file from the placeholder-only example:
-
-Windows PowerShell:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-macOS, Linux, or Ubuntu WSL:
-
-```bash
-cp .env.example .env
-```
-
-Replace every placeholder locally. Never commit `.env`.
+Create `.env` from the placeholder-only `.env.example` as shown in Quick Start,
+replace every placeholder locally, and never commit the resulting file.
 
 | Variable | Required for | Description |
 | --- | --- | --- |
@@ -355,27 +377,12 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 
 ### Run with Docker Compose
 
-Build and start the local stack:
+Use the Quick Start command to build and launch the base stack. PostgreSQL must
+become healthy, migrations must complete, and the API healthcheck must pass
+before Nginx starts. ReDoc is available at <http://127.0.0.1:8080/redoc> and
+liveness at <http://127.0.0.1:8080/api/v1/health>.
 
-```bash
-docker compose up -d --build
-```
-
-Startup order is:
-
-1. PostgreSQL becomes healthy through `pg_isready`.
-2. The one-shot `migrate` service applies Alembic migrations.
-3. FastAPI starts and passes its `/openapi.json` container healthcheck.
-4. Nginx starts and forwards requests to `api:8000`.
-
-Local URLs:
-
-- Swagger UI: <http://127.0.0.1:8080/docs>
-- ReDoc: <http://127.0.0.1:8080/redoc>
-- Liveness: <http://127.0.0.1:8080/api/v1/health>
-- Readiness: <http://127.0.0.1:8080/api/v1/health/ready>
-
-Inspect services and logs:
+Inspect status and logs:
 
 ```bash
 docker compose ps -a
@@ -441,35 +448,6 @@ python -m uvicorn app.main:app --reload
 ```
 
 Direct host execution serves Swagger at <http://127.0.0.1:8000/docs>.
-
-### Authentication quick start
-
-Register a requester:
-
-```bash
-curl -X POST "http://127.0.0.1:8080/api/v1/users" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "requester@example.com",
-    "full_name": "Example Requester",
-    "password": "<account-password>"
-  }'
-```
-
-Obtain a token. The OAuth2 `username` field contains the user's email:
-
-```bash
-curl -X POST "http://127.0.0.1:8080/api/v1/auth/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=requester@example.com&password=<account-password>"
-```
-
-Use the returned token:
-
-```bash
-curl "http://127.0.0.1:8080/api/v1/users/me" \
-  -H "Authorization: Bearer <jwt-access-token>"
-```
 
 ## Testing and Static Analysis
 
@@ -543,17 +521,23 @@ An SSM public-parameter data source for the latest Amazon Linux 2023 AMI is
 declared in `compute.tf`, but it is not connected to the EC2 `ami` argument.
 The operator must select and provide a compatible AMI ID for `us-west-2`.
 
-The safest repository-independent option is an environment variable:
+The repository includes a placeholder-only template. Copy it to the ignored
+local variables file and replace the placeholder with a compatible AMI ID:
+
+```powershell
+Set-Location .\terraform
+Copy-Item terraform.tfvars.example terraform.tfvars
+```
+
+Alternatively, provide the value without creating a file:
 
 ```powershell
 $env:TF_VAR_ec2_ami_id = "ami-REPLACE_WITH_VALID_AMI"
 ```
 
 Do not store account credentials or sensitive values in tracked variable
-files. A tracked example `.tfvars` file is not currently part of the
-repository; adding a placeholder-only template is a pending documentation
-improvement. Until then, use `TF_VAR_ec2_ami_id` or an ignored local
-`terraform.tfvars` file.
+files. `.gitignore` excludes the populated `terraform.tfvars` file while
+allowing `terraform.tfvars.example` to remain as a safe template.
 
 ### Terraform workflow from Windows PowerShell
 
@@ -563,6 +547,7 @@ shell:
 
 ```powershell
 $env:AWS_PROFILE = "ticketapi-tf"
+# Omit the next line when using a populated terraform.tfvars file.
 $env:TF_VAR_ec2_ami_id = "ami-REPLACE_WITH_VALID_AMI"
 
 aws sts get-caller-identity
@@ -616,17 +601,41 @@ not need port 22.
 - AWS CLI configured with the `ticketapi-dev` profile
 - AWS Session Manager Plugin
 - `amazon.aws` Ansible collection
-- Boto3 and Botocore for AWS API authentication and discovery
+- Boto3, Botocore, and Botocore CRT support for AWS authentication and API
+  operations
 - Access to the project S3 bucket used for temporary module transfers
 
-Example Python and collection setup inside Ubuntu WSL:
+The current Ubuntu WSL controller runs Ansible in a `pipx`-managed environment.
+Install AWS Python dependencies into that same isolated environment rather than
+the system Python environment:
+
+```bash
+pipx install ansible
+pipx runpip ansible install boto3 'botocore[crt]'
+ansible-galaxy collection install amazon.aws
+```
+
+The existing environment specifically required the following command to add
+CRT authentication support:
+
+```bash
+pipx runpip ansible install 'botocore[crt]'
+```
+
+As a reproducible alternative, keep Ansible and its dependencies together in a
+dedicated virtual environment:
 
 ```bash
 python3 -m venv ~/.venvs/ticket-api-ansible
 source ~/.venvs/ticket-api-ansible/bin/activate
-python -m pip install --upgrade pip ansible-core boto3 botocore
+python -m pip install --upgrade pip
+python -m pip install ansible boto3 'botocore[crt]'
 ansible-galaxy collection install amazon.aws
 ```
+
+Use one installation model consistently. Installing dependencies with the
+system `pip` will not make them available to an Ansible executable isolated by
+`pipx`.
 
 Install AWS CLI and the Session Manager Plugin using the official AWS
 instructions for the WSL distribution, then confirm the selected identity:
@@ -672,34 +681,54 @@ ansible-playbook -i ansible/Inventory/hosts.yml \
   ansible/playbooks/setup_docker.yml --syntax-check
 
 ansible-playbook -i ansible/Inventory/hosts.yml \
+  ansible/playbooks/install_compose.yml --syntax-check
+
+ansible-playbook \
+  -i ansible/Inventory/hosts.yml \
   ansible/playbooks/setup_docker.yml
+
+ansible-playbook \
+  -i ansible/Inventory/hosts.yml \
+  ansible/playbooks/install_compose.yml
 ```
 
-The playbook:
+`setup_docker.yml`:
 
 1. Installs the `docker` package through Amazon Linux `dnf`.
 2. Starts Docker and enables it at boot.
 3. Runs `docker --version` without marking the verification as a change.
-4. Displays the installed Docker version.
+4. Displays the verified Docker Engine version, currently `25.0.14`.
 
-The recorded first run completed with:
-
-```text
-ok=5 changed=2 unreachable=0 failed=0
-```
-
-The second run completed with:
+Its recorded first and second runs completed with:
 
 ```text
-changed=0 failed=0
+first:  ok=5 changed=2 unreachable=0 failed=0
+second: changed=0 failed=0
 ```
 
-This demonstrates idempotence: after the host reaches the declared state,
-running the same automation again produces no unnecessary changes. Idempotence
-makes infrastructure automation safer, repeatable, and suitable for recovery
-or continuous delivery workflows.
+`install_compose.yml`:
 
-The inventory graph and playbook syntax check have also been validated
+1. Asserts that the EC2 architecture is `x86_64`.
+2. Creates `/usr/local/lib/docker/cli-plugins` with root ownership.
+3. Downloads the pinned Docker Compose `v2.39.4` binary for Linux x86-64.
+4. Verifies the binary against the configured SHA-256 checksum before
+   installation.
+5. Runs `docker compose version` without reporting a configuration change.
+
+Its recorded first and second runs completed with:
+
+```text
+first:  ok=6 changed=2 unreachable=0 failed=0
+second: ok=6 changed=0 unreachable=0 failed=0
+```
+
+These successful results came from operator-run verification, not GitHub
+Actions. Together they demonstrate idempotence: after the host reaches the
+declared state, running the same automation again produces no unnecessary
+changes. Idempotence makes configuration safer, repeatable, and suitable for
+recovery or future delivery workflows.
+
+The inventory graph and both playbook syntax checks have also been validated
 successfully from Ubuntu WSL.
 
 ## Security and IAM
@@ -767,48 +796,16 @@ The current workflow validates code and container construction. It does not run
 Terraform or Ansible, publish an image, deploy to EC2, or implement continuous
 delivery. Jenkins is planned but not present in the repository.
 
-## Deployment Status
-
-### Implemented and verified
-
-- Backend API, authentication, RBAC, validation, and soft deletion
-- Local Docker Compose stack with Nginx and PostgreSQL
-- Automated CI validation
-- AWS VPC, subnets, routing, security group, EC2, IAM instance profile, Systems
-  Manager integration, and private Ansible S3 bucket
-- Terraform validation and no-change plan in the last recorded operator run
-- Ansible inventory and SSM connectivity workflow
-- Idempotent Docker Engine installation on EC2
-
-### In development
-
-- Install and validate Docker Compose on EC2
-- Define a secure deployment-time environment configuration
-- Transfer or pull the application artifacts/image
-- Start the Compose application stack on EC2
-- Validate the public health and readiness paths through Nginx
-- Reduce manually managed IAM dependencies where practical
-
-### Not yet implemented
-
-- Complete production deployment of Ticket-API in AWS
-- HTTPS and certificate automation
-- Jenkins continuous deployment
-- Prometheus and Grafana
-- Centralized logging, dashboards, alerting, and broader observability
-- Remote Terraform state and locking
-- Automated Terraform outputs or generated Ansible inventory
-
 ## Roadmap
 
-1. Add Docker Compose to the Amazon Linux 2023 host and deploy the existing
-   Nginx/API/PostgreSQL stack with environment-specific secrets.
-2. Introduce HTTPS and a production domain/ingress strategy.
-3. Add a secure image publishing and Jenkins deployment workflow.
-4. Add Prometheus metrics, Grafana dashboards, log aggregation, and alerts.
-5. Move Terraform state to a protected remote backend with locking.
-6. Bring remaining manual IAM configuration under reviewed infrastructure as
-   code.
-7. Add Terraform outputs and reduce static inventory maintenance.
-8. Define production backup, restore, retention, and disaster-recovery
+1. Deploy the existing Nginx/API/PostgreSQL Compose stack to EC2 with a secure
+   environment configuration and verify its public health endpoints.
+2. Add a container registry or equivalent release artifact flow and a reviewed
+   Jenkins deployment pipeline.
+3. Introduce HTTPS and a production domain and certificate strategy.
+4. Add Prometheus metrics, Grafana dashboards, centralized logs, and alerts.
+5. Move Terraform state to a protected remote backend with locking and bring
+   remaining manual IAM configuration under reviewed infrastructure as code.
+6. Add Terraform outputs and reduce static inventory maintenance.
+7. Define production backup, restore, retention, and disaster-recovery
    procedures.
