@@ -3,7 +3,7 @@ data "aws_ssm_parameter" "al2023_ami" {
 }
 
 resource "aws_instance" "api" {
-  ami           = data.aws_ssm_parameter.al2023_ami.value
+  ami           = var.ec2_ami_id
   instance_type = var.instance_type
 
   subnet_id                   = aws_subnet.public.id

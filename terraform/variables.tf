@@ -45,3 +45,8 @@ variable "instance_type" {
   type        = string
   default     = "t2.small"
 }
+
+variable "ec2_ami_id" {
+  description = "AMI utilizada por Ticket_API en EC2"
+  type        = string
+}
