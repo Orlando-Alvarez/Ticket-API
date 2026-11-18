@@ -1,0 +1,16 @@
+services:
+  api:
+    build: !reset null
+    image: "${TICKET_API_IMAGE:?TICKET_API_IMAGE is required}"
+    pull_policy: never
+    environment:
+      APP_DEBUG: "false"
+
+  migrate:
+    build: !reset null
+    image: "${TICKET_API_IMAGE:?TICKET_API_IMAGE is required}"
+    pull_policy: never
+
+  nginx:
+    ports: !override
+      - "127.0.0.1:8080:80"
