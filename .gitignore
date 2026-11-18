@@ -9,3 +9,18 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
+*.tfplan
+.terraform.tfstate.lock.info
+
+# Allow example variable files
+!*.tfvars.example
+

@@ -1,0 +1,3 @@
+# Amazon Linux 2023 AMI in the deployment region.
+# Replace with an existing, compatible AMI ID.
+ec2_ami_id = "ami-REPLACE_WITH_VALID_AMI"
