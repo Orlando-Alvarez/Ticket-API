@@ -20,7 +20,7 @@ python -m ruff check app tests
 ## Application Test Suite
 
 ```bash
-python -m pytest -v
+python -m pytest --ignore=tests/integration -v
 ```
 
 The FastAPI fixtures override the production database dependency with a shared
@@ -45,7 +45,8 @@ If Pytest cannot access its shared Windows temporary directory, use a unique
 base directory rather than changing assertions:
 
 ```powershell
-python -m pytest -v --basetemp "$env:TEMP\ticket-api-pytest-local"
+python -m pytest --ignore=tests/integration -v `
+  --basetemp "$env:TEMP\ticket-api-pytest-local"
 ```
 
 Use a unique directory name when concurrent runs are possible.
@@ -172,6 +173,12 @@ Operator-run validation has confirmed:
 - Idempotent Docker and Compose setup runs
 - Valid syntax for all Ansible playbooks
 - ECR pull playbook skipping download when the digest exists
+- Terraform security hardening applied successfully and a later plan reported
+  no pending changes
+- KMS key enabled with automatic key-material rotation verified
+- Existing credentials migrated to two encrypted Parameter Store
+  `SecureString` values and compared without reporting the values
+- Ansible host-side secret synchronization using the EC2 instance role
 - PostgreSQL, Alembic, FastAPI, and Nginx startup on EC2
 - HTTP 200 from `/api/v1/health/ready`
 - Successful second full deployment
@@ -182,6 +189,11 @@ deployment as unchanged.
 
 These validations are not CI jobs and should not be represented as automated
 release evidence.
+
+No automated test currently exercises live KMS, Parameter Store, IAM, or
+secret-migration behavior. Repository checks can validate Terraform syntax,
+Ansible syntax, and the Python synchronization script statically, but live AWS
+authorization and encrypted-value consistency remain operator-run checks.
 
 ## Evidence Worth Capturing
 

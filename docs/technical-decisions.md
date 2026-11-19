@@ -116,10 +116,31 @@ on one EC2 instance.
 - There are no rolling deployments, replica scheduling, or automatic failover.
 - PostgreSQL storage is tied to the host.
 
-Kubernetes is not currently required to demonstrate the project's intended
-engineering scope. It would add operational cost without solving a verified
-scale requirement. Revisit orchestration only if availability, scaling, or
-multi-host requirements become concrete.
+### Optional Kubernetes Learning Environment
+
+**Decision:** Kubernetes is planned as an additional, optional environment for
+learning and demonstrating container orchestration. Docker Compose remains the
+primary local and AWS deployment strategy. A lightweight local laboratory or
+temporary single-node K3s environment is preferred to control infrastructure
+costs.
+
+Kubernetes is not currently required by the application's scale, traffic, or
+availability requirements and is not implemented. A future learning scope may
+cover:
+
+- Pods, Deployments, Services, and Ingress or Gateway API
+- ConfigMaps and Secrets without embedding credentials in manifests
+- Jobs for Alembic migrations
+- Helm packaging
+- Existing readiness and liveness probes
+- Rolling-update and rollback demonstrations
+- A local Kind or k3d laboratory
+- An optional, temporary K3s deployment on AWS EC2
+
+The AWS laboratory has an incremental spending objective below USD 10 per
+month by using temporary resources. This is a cost-control target, not a
+guaranteed price. Amazon EKS is not the current deployment platform or the
+primary planned production target.
 
 ## PostgreSQL in Docker
 
@@ -191,21 +212,43 @@ image publication, and runtime pull access.
 - Some permissions are still configured manually.
 - Missing fine-grained permissions can interrupt provisioning or deployment.
 
-## Local Bootstrap Secrets
+## Parameter Store and KMS for Deployment Secrets
 
-**Decision:** Generate initial database and JWT secrets on EC2 in a root-only
-file.
+**Decision:** Preserve the existing PostgreSQL and JWT credentials in
+Parameter Store `SecureString` parameters encrypted with a customer-managed KMS
+key. Synchronize them to the EC2 host before Docker Compose starts.
 
 **Benefits**
 
-- Avoids transferring secret values through Ansible output.
-- Creates strong random values.
-- Protects an existing database from silent credential replacement.
+- Removes the managed source values from playbooks and controller-side files.
+- Uses the EC2 instance role instead of static AWS access keys.
+- Restricts the custom read policy to the two expected parameter ARNs and the
+  custom decrypt policy to the project key, regional SSM service, and matching
+  encryption contexts.
+- Stops deployment when an existing local environment file disagrees with the
+  managed values.
+- Keeps the current Compose contract without giving application containers AWS
+  permissions.
 
 **Tradeoffs**
 
-- Secrets remain host-local.
-- Rotation, recovery, centralized audit, and controlled application access are
-  not implemented.
-- Parameter Store or Secrets Manager is the intended next step.
+- Docker Compose still needs a root-owned `0600` `.env`; Parameter Store is not
+  consumed directly by the containers.
+- The parameters and their values are not Terraform-managed. This keeps secret
+  plaintext out of Terraform state but leaves the initial migration less
+  reproducible.
+- Parameter paths, region, database defaults, and accepted secret format are
+  currently fixed in the synchronization script.
+- The EC2 role has effective permissions from both the narrow custom policy
+  and broader AWS-managed Systems Manager policy.
+- KMS introduces a recurring key cost and API usage considerations; advanced
+  Parameter Store tiers or throughput can add cost.
+- KMS key-material rotation does not rotate PostgreSQL or JWT credentials.
+  Coordinated application-secret rotation and recovery remain future work.
+
+Parameter Store was selected over embedding secrets in Compose, Ansible, or
+Terraform variables because it supplies encrypted centralized storage and
+IAM-controlled retrieval while fitting the current EC2 deployment. The
+host-side synchronization step adds operational complexity, but avoids a
+larger application or container-runtime redesign at this stage.
 

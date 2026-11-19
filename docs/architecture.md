@@ -182,21 +182,25 @@ flowchart TB
     AWS --> VPC[VPC 10.20.0.0/16]
     VPC --> Public[Public subnet<br/>10.20.1.0/24]
     VPC --> Private[Private subnet<br/>10.20.2.0/24]
-    Internet[Internet] --> IGW[Internet Gateway]
-    IGW --> Public
+    Public -->|outbound route| IGW[Internet Gateway]
+    IGW --> Internet[Internet and AWS public endpoints]
     Public --> EC2[Amazon Linux 2023 EC2]
     AWS --> ECR[Private Amazon ECR]
+    AWS --> Parameters[Parameter Store<br/>SecureString]
+    AWS --> KMS[Customer-managed KMS key]
+    Parameters -->|encrypted with| KMS
     EC2 --> Profile[IAM instance profile]
     Profile --> SSM[AWS Systems Manager]
     Profile -->|pull only| ECR
+    Profile -->|scoped read and decrypt| Parameters
     Ansible[Ansible in Ubuntu WSL<br/>ticketapi-dev] --> SSM
     Ansible -. temporary modules .-> S3[Private encrypted S3 bucket]
 ```
 
-The EC2 instance has a public IP and its security group permits inbound
-HTTP/80, but the current Compose override does not publish Nginx on that port.
-Port 22 is not allowed. The private subnet exists without a NAT gateway and
-currently hosts no workload.
+The EC2 instance has a public IP, but its security group has no ingress rules.
+Public HTTP and SSH are both disabled. Unrestricted outbound IPv4 connectivity
+supports the current AWS API, ECR, and package dependencies. The private subnet
+exists without a NAT gateway and currently hosts no workload.
 
 ## AWS Image and Deployment Flow
 
@@ -205,9 +209,14 @@ flowchart LR
     Publisher[Authorized image publisher] -->|linux/amd64| ECR[Private ECR<br/>immutable tag]
     ECR -->|sha256 digest| Image[Local image on EC2]
     Ansible[Ansible controller] -->|SSM| Deploy[Deployment automation on EC2]
+    Deploy --> Sync[Host-side Boto3<br/>secret synchronization]
+    Role[EC2 IAM role] --> Parameters[Parameter Store<br/>SecureString]
+    Parameters -->|KMS decryption| Sync
+    Sync --> Env[Root-only .env]
     Image --> API[FastAPI]
     Image --> Migrate[Alembic]
     Deploy --> Compose[Docker Compose]
+    Env --> Compose
     Compose --> Nginx[Nginx<br/>127.0.0.1:8080]
     Compose --> API
     Compose --> Migrate
@@ -220,14 +229,17 @@ flowchart LR
 The API and migration services use the same ECR image. The image is pulled
 before Compose runs and is selected through
 `TICKET_API_IMAGE=<repository>@sha256:<digest>`. Compose does not build or pull
-the application image on EC2.
+the application image on EC2. Before Compose starts, the host-side script uses
+the EC2 role to retrieve and decrypt the two managed parameters, validates any
+existing `.env`, and reconstructs it only when absent. Containers read the
+local file; they do not access Parameter Store directly.
 
 ## Planned Architecture Additions
 
 The following components are not implemented:
 
 - Public HTTPS ingress and certificate automation
-- Parameter Store or Secrets Manager integration
+- Automated PostgreSQL and JWT secret rotation
 - Automated image publication and continuous deployment
 - Centralized metrics, logs, dashboards, and alerts
 - Remote Terraform state and locking
