@@ -47,54 +47,35 @@
         - compose.aws.yaml
         - nginx/default.conf
 
-    - name: Check existing environment file
-      ansible.builtin.stat:
-        path: "{{ deploy_dir }}/.env"
-        get_checksum: false
-      register: deployment_env
-
-    - name: Check existing PostgreSQL volume
-      ansible.builtin.command:
-        argv:
-          - docker
-          - volume
-          - inspect
-          - ticket-api_postgres_data
-      register: database_volume
-      changed_when: false
-      failed_when: false
-
-    - name: Prevent accidental secret replacement
-      ansible.builtin.assert:
-        that:
-          - deployment_env.stat.exists or database_volume.rc != 0
-        fail_msg: >-
-          PostgreSQL data already exists but the .env file is missing.
-          Restore the original credentials before deploying.
-
-    - name: Generate initial deployment secrets on EC2
+    - name: Ensure Python virtual environment for secrets
       ansible.builtin.command:
         argv:
           - python3
-          - -c
-          - |
-            import os
-            import secrets
-            from pathlib import Path
+          - -m
+          - venv
+          - "{{ deploy_dir }}/.venv-secrets"
+        creates: "{{ deploy_dir }}/.venv-secrets/bin/python"
 
-            path = Path("/opt/ticket-api/.env")
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            fd = os.open(str(path), flags, 0o600)
+    - name: Ensure Boto3 is installed
+      ansible.builtin.pip:
+        name: boto3
+        virtualenv: "{{ deploy_dir }}/.venv-secrets"
 
-            with os.fdopen(fd, "w", encoding="utf-8") as env:
-                env.write(
-                    "POSTGRES_USER=ticket_user\n"
-                    + f"POSTGRES_PASSWORD={secrets.token_urlsafe(36)}\n"
-                    + "POSTGRES_DB=ticket_api\n"
-                    + f"JWT_SECRET_KEY={secrets.token_urlsafe(48)}\n"
-                    + "APP_DEBUG=false\n"
-                )
-        creates: "{{ deploy_dir }}/.env"
+    - name: Copy secret synchronization script
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/sync_ssm_secrets.py"
+        dest: "{{ deploy_dir }}/sync_ssm_secrets.py"
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Synchronize secrets from Parameter Store
+      ansible.builtin.command:
+        argv:
+          - "{{ deploy_dir }}/.venv-secrets/bin/python"
+          - "{{ deploy_dir }}/sync_ssm_secrets.py"
+      register: secrets_sync
+      changed_when: "'CREATED:' in secrets_sync.stdout"
       no_log: true
 
     - name: Enforce environment file permissions

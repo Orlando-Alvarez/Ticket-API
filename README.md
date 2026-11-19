@@ -9,12 +9,13 @@
 Ticket-API combines a versioned FastAPI backend with relational persistence,
 JWT authentication, role and resource-level authorization, automated tests,
 containerized execution, Infrastructure as Code, private image distribution,
-and SSM-based AWS deployment automation.
+SSM-based AWS deployment automation, and KMS-backed secret management.
 
 The current AWS implementation deploys a digest-pinned image from private
-Amazon ECR to EC2 and verifies database readiness through Nginx. The service is
-intentionally bound to EC2 loopback while HTTPS, managed deployment secrets,
-and safe public exposure remain future work.
+Amazon ECR to EC2, synchronizes application secrets from Systems Manager
+Parameter Store, and verifies database readiness through Nginx. The service is
+intentionally bound to EC2 loopback; public access and HTTPS remain future
+work.
 
 ## Contents
 
@@ -38,11 +39,12 @@ and safe public exposure remain future work.
 | FastAPI backend | Implemented | Users, authentication, tickets, incidents, health checks, RBAC, and soft delete |
 | Local containers | Implemented | PostgreSQL, Alembic, FastAPI, and Nginx through Docker Compose |
 | CI | Implemented | Ruff, application tests, PostgreSQL integration, and Docker image build |
-| AWS infrastructure | Provisioned | VPC, subnets, routing, EC2, IAM/SSM, private ECR, and private S3 |
+| AWS infrastructure | Provisioned | VPC, subnets, routing, EC2, IAM/SSM, KMS, private ECR, and private S3 |
+| AWS secrets management | Implemented and operator-verified | KMS-encrypted Parameter Store values are validated and synchronized by Ansible on EC2 |
 | EC2 configuration | Operator-verified | Docker Engine 25.0.14 and Docker Compose v2.39.4 installed idempotently |
 | Image delivery | Operator-verified | `linux/amd64` image published to ECR and pulled by SHA-256 digest |
 | EC2 application deployment | Operator-verified | PostgreSQL, migrations, FastAPI, and Nginx started; readiness returned HTTP 200 |
-| Public AWS access | In development | Nginx is bound to `127.0.0.1:8080`; HTTPS is not configured |
+| Public AWS access | Intentionally disabled | The security group has no ingress rules, Nginx is bound to `127.0.0.1:8080`, and HTTPS is not configured |
 | Continuous deployment | Planned | Jenkins or equivalent deployment automation is not implemented |
 | Observability | Planned | Prometheus, Grafana, centralized logs, and alerts are not implemented |
 
@@ -68,7 +70,9 @@ and safe public exposure remain future work.
 - Nginx reverse proxy with rate limiting and operational logs
 - Terraform-managed AWS networking, compute, IAM, ECR, and S3
 - AWS Systems Manager administration without public SSH
-- Idempotent Ansible configuration and deployment
+- Customer-managed KMS encryption for Parameter Store `SecureString` secrets
+- EC2 instance-role access to deployment secrets without static AWS keys
+- Repeatable Ansible deployments with idempotent host configuration
 - Immutable ECR tags, scan on push, AES-256 encryption, and image retention
 - Exact image selection by SHA-256 digest
 
@@ -81,7 +85,7 @@ and safe public exposure remain future work.
 | Authentication | PyJWT, OAuth2 password flow, pwdlib with Argon2 |
 | Testing and linting | Pytest, FastAPI TestClient, httpx2, Ruff |
 | Containers | Docker, Docker Compose, Nginx |
-| AWS | EC2, VPC, IAM, ECR, Systems Manager, S3 |
+| AWS | EC2, VPC, IAM, ECR, Systems Manager, KMS, Parameter Store, S3 |
 | Automation | Terraform, Ansible, GitHub Actions |
 
 ## Architecture
@@ -111,10 +115,14 @@ flowchart LR
     CI --> BuildCheck[Docker image build check<br/>not published]
     Publisher[Authorized image publisher] --> Image[linux/amd64 image]
     Image --> ECR[Private Amazon ECR]
-    Terraform[Terraform] --> Infra[VPC · EC2 · IAM · ECR · S3]
+    Terraform[Terraform] --> Infra[VPC · EC2 · IAM · ECR · KMS · S3]
     Ansible[Ansible in Ubuntu WSL] -->|AWS Systems Manager| EC2[Amazon Linux 2023 EC2]
     ECR -->|sha256 digest| EC2
+    EC2 -->|instance role| Parameters[Parameter Store<br/>SecureString]
+    Parameters -->|encrypted with| KMS[Customer-managed KMS key]
+    Parameters -->|host-side synchronization| Env[Root-only .env]
     EC2 --> Compose[Docker Compose]
+    Env --> Compose
     Compose --> Nginx[Nginx<br/>127.0.0.1:8080]
     Compose --> API[FastAPI]
     Compose --> Migrate[Alembic]
@@ -221,10 +229,12 @@ The implemented manual workflow is:
 2. An authorized publisher builds the API image for `linux/amd64`.
 3. The image is pushed under an immutable tag and resolved to a digest.
 4. Ansible reaches EC2 through Systems Manager and pulls the exact digest.
-5. Ansible copies the layered Compose/Nginx configuration and creates initial
-   root-only deployment secrets.
-6. Docker Compose starts PostgreSQL, migrations, FastAPI, and Nginx.
-7. Ansible retries readiness until HTTP 200.
+5. A host-side Python script uses the EC2 instance role to decrypt the two
+   application secrets from Parameter Store.
+6. Existing credentials are validated before the root-only `.env` is retained
+   or reconstructed; mismatches stop the deployment.
+7. Docker Compose starts PostgreSQL, migrations, FastAPI, and Nginx.
+8. Ansible retries readiness until HTTP 200.
 
 The AWS merge uses:
 
@@ -242,12 +252,22 @@ port forwarding.
 
 ## CI and Testing
 
-Run locally:
+Run static analysis and application tests locally:
 
 ```bash
 python -m ruff check .
-python -m pytest -v
+python -m pytest --ignore=tests/integration -v
 ```
+
+PostgreSQL integration tests are separate. Configure an isolated disposable
+database named `ticket_api_test`, point `DATABASE_URL` to it, and then run:
+
+```bash
+python -m alembic upgrade head
+python -m pytest tests/integration -v
+```
+
+Never run the integration suite against development or production data.
 
 GitHub Actions defines three jobs:
 
@@ -270,7 +290,9 @@ Verified evidence currently includes:
 - Liveness and readiness endpoints
 - GitHub Actions workflow for tests and image-build validation
 - Successful private ECR publication and EC2 pull
-- Idempotent Docker/Compose configuration through Ansible
+- Successful KMS and Parameter Store provisioning and secret migration
+- Successful comparison of managed secrets with the protected EC2 environment
+- Idempotent Docker Engine and Compose CLI host setup through Ansible
 - Successful EC2 deployment and readiness HTTP 200
 - Successful repeat deployment with `changed=1` from the one-shot migration
   container
@@ -292,15 +314,18 @@ Implemented controls include:
 - Docker network separation and no AWS PostgreSQL host port
 - Nginx rate limiting and loopback-only AWS binding
 - IMDSv2 and encrypted EC2 root storage
-- No public SSH; administration through Systems Manager
+- No inbound security-group rules; administration through Systems Manager
 - Private, encrypted ECR and S3 resources
 - Pull-only ECR permissions for EC2
-- Root-only EC2 deployment environment file
+- Customer-managed KMS key with automatic key-material rotation
+- KMS-encrypted Parameter Store `SecureString` application secrets
+- Root-only EC2 environment file validated against Parameter Store
 
 Important limitations:
 
 - HTTP only; no public TLS ingress
-- Host-local deployment secrets rather than Parameter Store or Secrets Manager
+- No automated rotation of PostgreSQL or JWT credentials
+- A protected host-local `.env` remains necessary for Docker Compose
 - Local Terraform state
 - Partially manual controller IAM permissions
 - No PostgreSQL backup/recovery automation
@@ -311,13 +336,15 @@ See [Security](docs/security.md) for the complete control and limitation model.
 ## Roadmap
 
 1. Add HTTPS, certificate automation, and controlled public exposure.
-2. Move deployment secrets to Parameter Store or Secrets Manager.
+2. Implement coordinated PostgreSQL and JWT secret rotation and recovery.
 3. Implement PostgreSQL backup, restore, retention, and recovery procedures.
 4. Move Terraform state to an encrypted remote backend with locking.
 5. Automate ECR publication and digest promotion.
 6. Add a reviewed Jenkins or equivalent continuous-deployment workflow.
 7. Add Prometheus, Grafana, centralized logs, metrics, and alerts.
 8. Parameterize inventory and ECR values and expand deployment/security tests.
+9. Add an optional, low-cost Kubernetes learning environment after the
+   security, CI/CD, reliability, and observability milestones.
 
 ## Technical Documentation
 

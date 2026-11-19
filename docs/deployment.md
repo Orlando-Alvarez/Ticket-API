@@ -10,6 +10,8 @@ Ansible-deployment workflow. It does not represent continuous delivery.
 - The API image is stored in private Amazon ECR.
 - EC2 pulls a specific SHA-256 digest through its instance role.
 - Ansible connects through AWS Systems Manager, not SSH.
+- KMS-encrypted application secrets are retrieved from Parameter Store by the
+  EC2 instance role during deployment.
 - Docker Compose runs PostgreSQL, migrations, FastAPI, and Nginx.
 - Readiness has been verified with HTTP 200.
 - Nginx is bound to `127.0.0.1:8080` on EC2.
@@ -23,9 +25,17 @@ Ansible-deployment workflow. It does not represent continuous delivery.
 | `compose.prod.yaml` | Forces debug off, removes PostgreSQL host exposure, and publishes Nginx on port 80 |
 | `compose.aws.yaml` | Replaces API builds with the ECR image, disables Compose pulls, and rebinds Nginx to loopback port 8080 |
 
-The AWS deployment combines files in this exact order:
+The AWS merge requires a valid deployment `.env` containing the PostgreSQL and
+JWT variables consumed by the base Compose file. On EC2, Ansible creates or
+validates `/opt/ticket-api/.env` before this configuration check. Do not copy
+secret values into the command line or documentation.
+
+From `/opt/ticket-api`, set the exact ECR image reference before validating the
+files:
 
 ```bash
+export TICKET_API_IMAGE="<ecr-repository-uri>@sha256:<64-hex-character-digest>"
+
 docker compose \
   -f docker-compose.yml \
   -f compose.prod.yaml \
@@ -36,13 +46,9 @@ docker compose \
 `compose.aws.yaml` wins the final Nginx port override. PostgreSQL remains
 unpublished because `compose.prod.yaml` resets its host ports.
 
-The application and migration services require:
-
-```dotenv
-TICKET_API_IMAGE=<ecr-repository-uri>@sha256:<64-hex-character-digest>
-```
-
-They use `pull_policy: never`; the image must already exist in the EC2 Docker
+Replace both placeholders with the real repository URI and a valid lowercase
+64-character SHA-256 digest. The application and migration services use
+`pull_policy: never`, so that exact image must already exist in the EC2 Docker
 image store.
 
 ## Publish the API Image to ECR
@@ -245,19 +251,89 @@ The deployment:
 
 1. Creates `/opt/ticket-api` and `/opt/ticket-api/nginx`.
 2. Copies the three Compose files and Nginx configuration.
-3. Checks for the environment file and PostgreSQL volume.
-4. Generates initial database and JWT secrets directly on EC2 only when `.env`
-   does not exist.
-5. Refuses to replace missing credentials when an existing database volume is
-   detected.
-6. Enforces root ownership and mode `0600` on `.env`.
-7. Validates the merged Compose configuration without logging environment
+3. Creates a dedicated Python virtual environment, installs Boto3, and copies
+   `ansible/files/sync_ssm_secrets.py` with mode `0700`.
+4. Runs the script on EC2 under privilege escalation. Boto3 uses the EC2
+   instance role and requests both `SecureString` parameters with
+   `WithDecryption=True`.
+5. If `/opt/ticket-api/.env` exists, compares its PostgreSQL password, JWT
+   secret, database user, and database name with the expected values.
+6. Refuses to overwrite the file when credentials or database settings do not
+   match. This protects the existing PostgreSQL volume from an accidental
+   password replacement.
+7. If `.env` is absent, reconstructs it from Parameter Store and fixed
+   deployment defaults using exclusive, no-follow creation.
+8. Enforces root ownership and mode `0600` on `.env`.
+9. Validates the merged Compose configuration without logging environment
    values.
-8. Starts the stack without building or pulling through Compose.
-9. Retries `/api/v1/health/ready` until it returns HTTP 200.
+10. Starts the stack without building or pulling through Compose.
+11. Retries `/api/v1/health/ready` until it returns HTTP 200.
 
-The generated `.env` is an initial bootstrap mechanism, not managed secret
-storage. Parameter Store or Secrets Manager integration remains planned.
+The synchronization occurs on the EC2 host; the application and PostgreSQL
+containers do not call Parameter Store. Docker Compose continues to consume a
+protected local `.env` copy. The playbook applies `no_log` to the secret task,
+so decrypted values are not included in normal Ansible output.
+
+The script rejects non-`SecureString` parameters, unexpected secret
+characters, symlink or non-file environment paths, duplicate environment keys,
+and credential mismatches. Its paths, region, database defaults, and accepted
+secret character set are currently development-specific. It validates
+consistency but does not rotate credentials.
+
+## Validate Secret Infrastructure Without Printing Values
+
+The following commands inspect metadata only. They do not request decrypted
+parameter values.
+
+Check the KMS key state and automatic rotation:
+
+```bash
+aws kms describe-key \
+  --key-id alias/ticket-api-dev-secrets \
+  --query 'KeyMetadata.{KeyState:KeyState,Enabled:Enabled,KeyManager:KeyManager}'
+
+aws kms get-key-rotation-status \
+  --key-id alias/ticket-api-dev-secrets \
+  --query 'KeyRotationEnabled'
+```
+
+Check Parameter Store metadata:
+
+```bash
+aws ssm describe-parameters \
+  --parameter-filters \
+    'Key=Name,Option=BeginsWith,Values=/ticket-api/dev/' \
+  --query 'Parameters[].{Name:Name,Type:Type,Tier:Tier,KeyId:KeyId}'
+```
+
+Check local file ownership and mode through Ansible without reading content:
+
+```bash
+ansible \
+  -i ansible/Inventory/hosts.yml \
+  ticket_api \
+  --become \
+  -m ansible.builtin.command \
+  -a "stat -c '%U:%G %a %n' /opt/ticket-api/.env"
+```
+
+Expected metadata is a regular root-owned file with mode `600`. Never use
+`cat`, shell tracing, `GetParameter --with-decryption`, or Ansible debug output
+to troubleshoot secret values.
+
+### Synchronization Failure Checklist
+
+If deployment stops during secret synchronization:
+
+1. Confirm the EC2 role contains the custom secret-read policy in addition to
+   its Systems Manager and ECR attachments.
+2. Confirm both parameter names and their `SecureString` type using metadata
+   commands only.
+3. Confirm the KMS key is enabled and its alias resolves.
+4. Confirm `/opt/ticket-api/.env` is a root-owned regular file, not a symlink.
+5. Treat a mismatch as an operational incident. Determine which credential is
+   authoritative before changing either store; do not delete `.env` to bypass
+   the guard.
 
 ## Secure Temporary Access with SSM Port Forwarding
 
@@ -295,6 +371,12 @@ The following manual validations have been reported successfully:
 - Image published successfully to ECR
 - Image pulled manually from EC2
 - ECR pull playbook unchanged when the digest already existed
+- Terraform validation and successful security-hardening application
+- A subsequent Terraform plan reporting no pending changes
+- KMS key enabled with automatic key-material rotation verified
+- Both application secrets migrated as encrypted `SecureString` parameters
+  and compared with the existing protected values
+- Ansible deployment synchronized secrets while reusing the existing ECR image
 - PostgreSQL, migrations, FastAPI, and Nginx deployed successfully
 - Readiness returned HTTP 200
 - Second full deployment succeeded with `changed=1`
@@ -311,7 +393,10 @@ These are operator-run validations, not GitHub Actions results.
 - ECR registry values are environment-specific in the current playbooks.
 - The inventory uses a static EC2 instance ID.
 - Nginx is loopback-only and does not terminate TLS.
-- Secrets reside in a root-only local file rather than a managed AWS service.
+- Parameter Store is the encrypted source for application secrets, but Docker
+  Compose still requires a root-only local `.env` copy.
+- Secret synchronization is environment-specific and rotation is not
+  automated.
 - PostgreSQL uses a host-bound Docker volume without automated backups.
 - No automated rollback, release promotion, monitoring, or alerting exists.
 
