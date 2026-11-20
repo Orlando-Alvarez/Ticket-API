@@ -11,10 +11,10 @@ Continuous Integration, and manual infrastructure/deployment validation.
 python -m ruff check .
 ```
 
-GitHub Actions scopes Ruff to `app` and `tests`:
+GitHub Actions scopes Ruff to the application, tests, and the DDNS script:
 
 ```bash
-python -m ruff check app tests
+python -m ruff check app tests ansible/files/cloudflare_ddns.py
 ```
 
 ## Application Test Suite
@@ -36,6 +36,8 @@ in-memory SQLite database. Covered behavior includes:
 - Soft-delete authorization, auditing, visibility, and repeat handling
 - Health liveness/readiness and safe database failures
 - ORM relationships, constraints, defaults, and indexes
+- DDNS unchanged, dry-run, apply, record-count, DNS-only, and identifier logic
+  with mocked external calls
 
 No test coverage percentage is published.
 
@@ -153,6 +155,18 @@ ansible-playbook -i ansible/Inventory/hosts.yml \
 
 ansible-playbook -i ansible/Inventory/hosts.yml \
   ansible/playbooks/deploy_app.yml --syntax-check
+
+ansible-playbook -i ansible/Inventory/hosts.yml \
+  ansible/playbooks/setup_cloudflare_ddns.yml --syntax-check
+
+ansible-playbook -i ansible/Inventory/hosts.yml \
+  ansible/playbooks/setup_certbot.yml --syntax-check
+
+ansible-playbook -i ansible/Inventory/hosts.yml \
+  ansible/playbooks/setup_certbot_credentials.yml --syntax-check
+
+ansible-playbook -i ansible/Inventory/hosts.yml \
+  ansible/playbooks/setup_certbot_renewal.yml --syntax-check
 ```
 
 ### Terraform
@@ -181,6 +195,11 @@ Operator-run validation has confirmed:
 - Ansible host-side secret synchronization using the EC2 instance role
 - PostgreSQL, Alembic, FastAPI, and Nginx startup on EC2
 - HTTP 200 from `/api/v1/health/ready`
+- Public Swagger UI and readiness responses over valid HTTPS
+- Cloudflare DNS-only synchronization with the EC2 public IPv4 address
+- Successful Let's Encrypt renewal simulation
+- Successful Nginx validation and reload through the deploy hook
+- DDNS and certificate-renewal systemd timer checks
 - Successful second full deployment
 
 The second full deployment reported `changed=1` because the one-shot Alembic
@@ -190,10 +209,11 @@ deployment as unchanged.
 These validations are not CI jobs and should not be represented as automated
 release evidence.
 
-No automated test currently exercises live KMS, Parameter Store, IAM, or
-secret-migration behavior. Repository checks can validate Terraform syntax,
-Ansible syntax, and the Python synchronization script statically, but live AWS
-authorization and encrypted-value consistency remain operator-run checks.
+No automated test currently exercises live KMS, Parameter Store, IAM,
+Cloudflare, ACME, systemd, or certificate renewal. DDNS unit tests mock external
+calls. Repository checks can validate Terraform and Ansible syntax and Python
+logic statically, but live authorization, DNS propagation, TLS, and encrypted
+value consistency remain operator-run checks.
 
 ## Evidence Worth Capturing
 
@@ -204,9 +224,10 @@ portfolio evidence would include:
 2. A redacted authenticated API response.
 3. GitHub Actions showing all three CI jobs passing.
 4. Ansible recap for the first and repeat deployment.
-5. An SSM-forwarded readiness response from EC2.
+5. Public Swagger and readiness responses with certificate details redacted.
 6. ECR repository settings showing immutable tags and scan on push, with
    account identifiers redacted.
+7. Redacted `systemctl list-timers` output for DDNS and certificate renewal.
 
 Do not include `.env` values, tokens, AWS account IDs, instance IDs, registry
 hostnames, database URLs, or Terraform state in screenshots.

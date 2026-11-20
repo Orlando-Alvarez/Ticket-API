@@ -13,9 +13,11 @@ Ansible-deployment workflow. It does not represent continuous delivery.
 - KMS-encrypted application secrets are retrieved from Parameter Store by the
   EC2 instance role during deployment.
 - Docker Compose runs PostgreSQL, migrations, FastAPI, and Nginx.
-- Readiness has been verified with HTTP 200.
-- Nginx is bound to `127.0.0.1:8080` on EC2.
-- HTTPS and public application exposure are not implemented.
+- Nginx publishes HTTPS on TCP 443 and terminates TLS for
+  `api.orlandoalvarez.dev`.
+- HTTP is bound to `127.0.0.1:8080` and exposes only database readiness.
+- Public Swagger and readiness have been manually verified with HTTP 200.
+- Cloudflare provides DNS only; there is no load balancer or Elastic IP.
 
 ## Compose File Layering
 
@@ -23,7 +25,7 @@ Ansible-deployment workflow. It does not represent continuous delivery.
 | --- | --- |
 | `docker-compose.yml` | Base services, local builds, networks, volume, health checks, and development ports |
 | `compose.prod.yaml` | Forces debug off, removes PostgreSQL host exposure, and publishes Nginx on port 80 |
-| `compose.aws.yaml` | Replaces API builds with the ECR image, disables Compose pulls, and rebinds Nginx to loopback port 8080 |
+| `compose.aws.yaml` | Uses the ECR image, publishes HTTPS 443, keeps HTTP on loopback 8080, and mounts the AWS Nginx configuration and certificates read-only |
 
 The AWS merge requires a valid deployment `.env` containing the PostgreSQL and
 JWT variables consumed by the base Compose file. On EC2, Ansible creates or
@@ -43,8 +45,10 @@ docker compose \
   config --quiet
 ```
 
-`compose.aws.yaml` wins the final Nginx port override. PostgreSQL remains
-unpublished because `compose.prod.yaml` resets its host ports.
+`compose.aws.yaml` wins the final Nginx port and volume overrides. PostgreSQL
+remains unpublished because `compose.prod.yaml` resets its host ports. The
+Let's Encrypt certificate files must exist under `/etc/letsencrypt` before the
+HTTPS Nginx container can start successfully.
 
 Replace both placeholders with the real repository URI and a valid lowercase
 64-character SHA-256 digest. The application and migration services use
@@ -187,6 +191,18 @@ ansible-playbook -i ansible/Inventory/hosts.yml \
 
 ansible-playbook -i ansible/Inventory/hosts.yml \
   ansible/playbooks/deploy_app.yml --syntax-check
+
+ansible-playbook -i ansible/Inventory/hosts.yml \
+  ansible/playbooks/setup_cloudflare_ddns.yml --syntax-check
+
+ansible-playbook -i ansible/Inventory/hosts.yml \
+  ansible/playbooks/setup_certbot.yml --syntax-check
+
+ansible-playbook -i ansible/Inventory/hosts.yml \
+  ansible/playbooks/setup_certbot_credentials.yml --syntax-check
+
+ansible-playbook -i ansible/Inventory/hosts.yml \
+  ansible/playbooks/setup_certbot_renewal.yml --syntax-check
 ```
 
 ## Configure the EC2 Host
@@ -250,7 +266,7 @@ required for normal deployment.
 The deployment:
 
 1. Creates `/opt/ticket-api` and `/opt/ticket-api/nginx`.
-2. Copies the three Compose files and Nginx configuration.
+2. Copies the three Compose files and both local/AWS Nginx configurations.
 3. Creates a dedicated Python virtual environment, installs Boto3, and copies
    `ansible/files/sync_ssm_secrets.py` with mode `0700`.
 4. Runs the script on EC2 under privilege escalation. Boto3 uses the EC2
@@ -279,6 +295,13 @@ characters, symlink or non-file environment paths, duplicate environment keys,
 and credential mismatches. Its paths, region, database defaults, and accepted
 secret character set are currently development-specific. It validates
 consistency but does not rotate credentials.
+
+`deploy_app.yml` does not configure Cloudflare, issue the initial certificate,
+or install the DDNS and renewal timers. Those are separate operator-run
+playbooks and procedures. The current HTTPS workflow assumes an already
+deployed host with `/opt/ticket-api/.venv-secrets`; a completely clean host is
+not yet handled by one end-to-end bootstrap playbook. Follow
+[HTTPS and Dynamic DNS](https-ddns.md) before starting the HTTPS Compose stack.
 
 ## Validate Secret Infrastructure Without Printing Values
 
@@ -335,10 +358,10 @@ If deployment stops during secret synchronization:
    authoritative before changing either store; do not delete `.env` to bypass
    the guard.
 
-## Secure Temporary Access with SSM Port Forwarding
+## Loopback Readiness Through SSM Port Forwarding
 
-The current AWS deployment is not publicly exposed. From Windows PowerShell,
-forward a local port to Nginx on the managed EC2 instance:
+For origin diagnostics that bypass public DNS, forward a local port to the
+loopback-only HTTP listener on the managed EC2 instance:
 
 ```powershell
 aws ssm start-session `
@@ -351,12 +374,11 @@ aws ssm start-session `
 
 Keep the session open, then use:
 
-- Swagger UI: <http://127.0.0.1:18080/docs>
-- Liveness: <http://127.0.0.1:18080/api/v1/health>
 - Readiness: <http://127.0.0.1:18080/api/v1/health/ready>
 
-This forwards only the Nginx port. Do not expose PostgreSQL or copy deployment
-credentials to a client machine for testing.
+The AWS HTTP server returns `404` for other paths; public API and Swagger access
+must use `https://api.orlandoalvarez.dev`. Do not expose PostgreSQL or copy
+deployment credentials to a client machine for testing.
 
 ## Verified Operator Results
 
@@ -379,6 +401,11 @@ The following manual validations have been reported successfully:
 - Ansible deployment synchronized secrets while reusing the existing ECR image
 - PostgreSQL, migrations, FastAPI, and Nginx deployed successfully
 - Readiness returned HTTP 200
+- Cloudflare DNS-only A record synchronized with the EC2 public IPv4 address
+- Public Swagger UI and readiness returned HTTP 200 over valid HTTPS
+- Let's Encrypt renewal simulation completed successfully
+- The deploy hook validated and reloaded Nginx successfully
+- DDNS and Certbot renewal systemd timers were checked successfully
 - Second full deployment succeeded with `changed=1`
 
 The second full deployment was not completely unchanged because the one-shot
@@ -392,7 +419,10 @@ These are operator-run validations, not GitHub Actions results.
 - Publication and deployment are manual.
 - ECR registry values are environment-specific in the current playbooks.
 - The inventory uses a static EC2 instance ID.
-- Nginx is loopback-only and does not terminate TLS.
+- Nginx terminates TLS on one EC2 instance; there is no load balancer, Elastic
+  IP, or high-availability ingress.
+- Initial certificate issuance and clean-host HTTPS bootstrap remain manual.
+- Cloudflare is DNS-only and does not proxy or protect origin traffic.
 - Parameter Store is the encrypted source for application secrets, but Docker
   Compose still requires a root-only local `.env` copy.
 - Secret synchronization is environment-specific and rotation is not

@@ -17,9 +17,10 @@ Ticket-API currently has three distinct operating contexts:
    image is distributed through private ECR, and Ansible deploys the Compose
    stack to EC2 through AWS Systems Manager.
 
-The AWS deployment is operational but intentionally private: Nginx is bound to
-`127.0.0.1:8080` on EC2. HTTPS and public application exposure are not
-implemented.
+The AWS deployment is publicly reachable at
+`https://api.orlandoalvarez.dev`. Nginx publishes HTTPS on TCP 443 while its
+HTTP listener remains bound to `127.0.0.1:8080` for readiness checks.
+Cloudflare supplies DNS only; requests connect directly to EC2.
 
 ## Backend Application Architecture
 
@@ -185,6 +186,10 @@ flowchart TB
     Public -->|outbound route| IGW[Internet Gateway]
     IGW --> Internet[Internet and AWS public endpoints]
     Public --> EC2[Amazon Linux 2023 EC2]
+    Client[Public API client] -->|DNS lookup| Cloudflare[Cloudflare DNS-only<br/>A record]
+    Cloudflare -->|EC2 public IPv4| Client
+    Client -->|HTTPS 443| SG[Security group]
+    SG --> EC2
     AWS --> ECR[Private Amazon ECR]
     AWS --> Parameters[Parameter Store<br/>SecureString]
     AWS --> KMS[Customer-managed KMS key]
@@ -195,12 +200,16 @@ flowchart TB
     Profile -->|scoped read and decrypt| Parameters
     Ansible[Ansible in Ubuntu WSL<br/>ticketapi-dev] --> SSM
     Ansible -. temporary modules .-> S3[Private encrypted S3 bucket]
+    EC2 --> DDNS[DDNS systemd service]
+    IMDS[IMDSv2] -->|public IPv4| DDNS
+    DDNS -->|update A record| Cloudflare
 ```
 
-The EC2 instance has a public IP, but its security group has no ingress rules.
-Public HTTP and SSH are both disabled. Unrestricted outbound IPv4 connectivity
-supports the current AWS API, ECR, and package dependencies. The private subnet
-exists without a NAT gateway and currently hosts no workload.
+The EC2 instance has a public but non-elastic IPv4 address. Its security group
+accepts public TCP 443 and has no public HTTP or SSH rule. Unrestricted outbound
+IPv4 connectivity supports AWS APIs, ECR, package retrieval, Cloudflare, and
+ACME operations. The private subnet exists without a NAT gateway and currently
+hosts no workload. No Application Load Balancer or Elastic IP is provisioned.
 
 ## AWS Image and Deployment Flow
 
@@ -213,11 +222,15 @@ flowchart LR
     Role[EC2 IAM role] --> Parameters[Parameter Store<br/>SecureString]
     Parameters -->|KMS decryption| Sync
     Sync --> Env[Root-only .env]
+    Parameters --> CloudTokens[DDNS and Certbot tokens]
+    CloudTokens --> TLS[Host DDNS and Certbot automation]
+    TLS --> Certs[Let's Encrypt certificates]
     Image --> API[FastAPI]
     Image --> Migrate[Alembic]
     Deploy --> Compose[Docker Compose]
     Env --> Compose
-    Compose --> Nginx[Nginx<br/>127.0.0.1:8080]
+    Compose --> Nginx[Nginx<br/>HTTPS 443 and loopback HTTP]
+    Certs -->|read-only mount| Nginx
     Compose --> API
     Compose --> Migrate
     Compose --> DB[(PostgreSQL volume)]
@@ -230,19 +243,25 @@ The API and migration services use the same ECR image. The image is pulled
 before Compose runs and is selected through
 `TICKET_API_IMAGE=<repository>@sha256:<digest>`. Compose does not build or pull
 the application image on EC2. Before Compose starts, the host-side script uses
-the EC2 role to retrieve and decrypt the two managed parameters, validates any
+the EC2 role to retrieve and decrypt the two application parameters, validates any
 existing `.env`, and reconstructs it only when absent. Containers read the
-local file; they do not access Parameter Store directly.
+local file; they do not access Parameter Store directly. Separate host-side
+automation retrieves the Cloudflare tokens, synchronizes DNS, renews the
+certificate, and reloads Nginx only after configuration validation.
 
 ## Planned Architecture Additions
 
 The following components are not implemented:
 
-- Public HTTPS ingress and certificate automation
+- Automated clean-host certificate bootstrap
 - Automated PostgreSQL and JWT secret rotation
 - Automated image publication and continuous deployment
 - Centralized metrics, logs, dashboards, and alerts
 - Remote Terraform state and locking
 - PostgreSQL backup and disaster recovery
 - Multi-host scheduling or high availability
+
+The current public deployment is a single EC2 origin using a DNS-only record.
+Cloudflare proxying, a load balancer, an Elastic IP, and managed certificate
+termination are not part of the architecture.
 
