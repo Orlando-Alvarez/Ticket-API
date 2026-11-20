@@ -1,0 +1,16 @@
+
+[Unit]
+Description=Renew Ticket-API Let's Encrypt certificate
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/letsencrypt/renewal/api.orlandoalvarez.dev.conf
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+
+ExecStartPre=/opt/ticket-api/.venv-secrets/bin/python /opt/ticket-api/sync_certbot_credentials.py
+
+ExecStart=/opt/ticket-api/.venv-certbot/bin/certbot renew --non-interactive --cert-name api.orlandoalvarez.dev --deploy-hook /usr/local/sbin/reload-ticket-api-nginx

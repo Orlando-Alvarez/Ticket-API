@@ -46,6 +46,7 @@
         - compose.prod.yaml
         - compose.aws.yaml
         - nginx/default.conf
+        - nginx/aws-https.conf
 
     - name: Ensure Python virtual environment for secrets
       ansible.builtin.command:

@@ -1,0 +1,48 @@
+---
+- name: Automate Ticket-API certificate renewal
+  hosts: ticket_api
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Verify Certbot renewal configuration exists
+      ansible.builtin.stat:
+        path: /etc/letsencrypt/renewal/api.orlandoalvarez.dev.conf
+      register: renewal_config
+
+    - name: Require existing certificate
+      ansible.builtin.assert:
+        that:
+          - renewal_config.stat.exists
+        fail_msg: "Issue the certificate before enabling renewal"
+
+    - name: Install Nginx reload hook
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/reload_ticket_api_nginx.sh"
+        dest: /usr/local/sbin/reload-ticket-api-nginx
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Install Certbot renewal service
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/ticket-api-certbot-renew.service"
+        dest: /etc/systemd/system/ticket-api-certbot-renew.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install Certbot renewal timer
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/ticket-api-certbot-renew.timer"
+        dest: /etc/systemd/system/ticket-api-certbot-renew.timer
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Enable and start Certbot renewal timer
+      ansible.builtin.systemd_service:
+        name: ticket-api-certbot-renew.timer
+        enabled: true
+        state: started
+        daemon_reload: true

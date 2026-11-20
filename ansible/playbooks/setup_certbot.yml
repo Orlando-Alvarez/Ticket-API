@@ -1,0 +1,44 @@
+---
+- name: Prepare Certbot on Ticket-API EC2
+  hosts: ticket_api
+  become: true
+  gather_facts: false
+
+  vars:
+    certbot_venv: /opt/ticket-api/.venv-certbot
+
+  tasks:
+    - name: Install Python 3.11
+      ansible.builtin.dnf:
+        name:
+          - python3.11
+          - python3.11-pip
+        state: present
+
+    - name: Create Certbot virtual environment
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3.11
+          - -m
+          - venv
+          - "{{ certbot_venv }}"
+        creates: "{{ certbot_venv }}/bin/python"
+
+    - name: Install Certbot and Cloudflare plugin
+      ansible.builtin.pip:
+        name:
+          - "certbot>=5.0,<6.0"
+          - "certbot-dns-cloudflare>=5.0,<6.0"
+        virtualenv: "{{ certbot_venv }}"
+
+    - name: Check Certbot version
+      ansible.builtin.command:
+        argv:
+          - "{{ certbot_venv }}/bin/certbot"
+          - --version
+      register: certbot_version
+      changed_when: false
+
+    - name: Display Certbot version
+      ansible.builtin.debug:
+        var: certbot_version.stdout
