@@ -1,0 +1,12 @@
+
+[Unit]
+Description=Run Ticket-API Cloudflare DNS synchronization periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=ticket-api-ddns.service
+
+[Install]
+WantedBy=timers.target
