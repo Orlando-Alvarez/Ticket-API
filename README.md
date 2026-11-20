@@ -5,17 +5,24 @@
 **Python · FastAPI · PostgreSQL · Docker · AWS · Terraform · Ansible**
 
 [![CI](https://github.com/Orlando-Alvarez/Ticket-API/actions/workflows/ci.yml/badge.svg)](https://github.com/Orlando-Alvarez/Ticket-API/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 
 Ticket-API combines a versioned FastAPI backend with relational persistence,
 JWT authentication, role and resource-level authorization, automated tests,
 containerized execution, Infrastructure as Code, private image distribution,
-SSM-based AWS deployment automation, and KMS-backed secret management.
+SSM-based AWS deployment automation, KMS-backed secret management, dynamic
+DNS, and automated TLS certificate renewal.
 
 The current AWS implementation deploys a digest-pinned image from private
 Amazon ECR to EC2, synchronizes application secrets from Systems Manager
-Parameter Store, and verifies database readiness through Nginx. The service is
-intentionally bound to EC2 loopback; public access and HTTPS remain future
-work.
+Parameter Store, and serves the API through Nginx with Let's Encrypt TLS. A
+Cloudflare DNS-only A record is synchronized with the instance's changing
+public IPv4 address.
+
+**Live API documentation:** [Swagger UI](https://api.orlandoalvarez.dev/docs) ·
+[ReDoc](https://api.orlandoalvarez.dev/redoc)
 
 ## Contents
 
@@ -44,7 +51,8 @@ work.
 | EC2 configuration | Operator-verified | Docker Engine 25.0.14 and Docker Compose v2.39.4 installed idempotently |
 | Image delivery | Operator-verified | `linux/amd64` image published to ECR and pulled by SHA-256 digest |
 | EC2 application deployment | Operator-verified | PostgreSQL, migrations, FastAPI, and Nginx started; readiness returned HTTP 200 |
-| Public AWS access | Intentionally disabled | The security group has no ingress rules, Nginx is bound to `127.0.0.1:8080`, and HTTPS is not configured |
+| Public HTTPS | Implemented and operator-verified | `api.orlandoalvarez.dev` serves Swagger through Nginx on TCP 443 with a valid Let's Encrypt certificate |
+| DNS and certificate automation | Implemented and operator-verified | Cloudflare DDNS and Certbot renewal run through dedicated systemd services and timers |
 | Continuous deployment | Planned | Jenkins or equivalent deployment automation is not implemented |
 | Observability | Planned | Prometheus, Grafana, centralized logs, and alerts are not implemented |
 
@@ -73,6 +81,9 @@ work.
 - Customer-managed KMS encryption for Parameter Store `SecureString` secrets
 - EC2 instance-role access to deployment secrets without static AWS keys
 - Repeatable Ansible deployments with idempotent host configuration
+- Cloudflare DNS-only dynamic DNS driven by EC2 IMDSv2
+- Let's Encrypt DNS-01 certificates and automated Certbot renewal
+- Nginx TLS termination on public TCP 443 with read-only certificate mounts
 - Immutable ECR tags, scan on push, AES-256 encryption, and image retention
 - Exact image selection by SHA-256 digest
 
@@ -86,6 +97,7 @@ work.
 | Testing and linting | Pytest, FastAPI TestClient, httpx2, Ruff |
 | Containers | Docker, Docker Compose, Nginx |
 | AWS | EC2, VPC, IAM, ECR, Systems Manager, KMS, Parameter Store, S3 |
+| DNS and TLS | Cloudflare DNS, Let's Encrypt, Certbot, systemd |
 | Automation | Terraform, Ansible, GitHub Actions |
 
 ## Architecture
@@ -110,31 +122,32 @@ service layer.
 ### AWS Deployment
 
 ```mermaid
-flowchart LR
-    CI[GitHub Actions<br/>tests and build validation]
-    CI --> BuildCheck[Docker image build check<br/>not published]
-    Publisher[Authorized image publisher] --> Image[linux/amd64 image]
-    Image --> ECR[Private Amazon ECR]
-    Terraform[Terraform] --> Infra[VPC · EC2 · IAM · ECR · KMS · S3]
-    Ansible[Ansible in Ubuntu WSL] -->|AWS Systems Manager| EC2[Amazon Linux 2023 EC2]
-    ECR -->|sha256 digest| EC2
-    EC2 -->|instance role| Parameters[Parameter Store<br/>SecureString]
-    Parameters -->|encrypted with| KMS[Customer-managed KMS key]
-    Parameters -->|host-side synchronization| Env[Root-only .env]
-    EC2 --> Compose[Docker Compose]
-    Env --> Compose
-    Compose --> Nginx[Nginx<br/>127.0.0.1:8080]
-    Compose --> API[FastAPI]
-    Compose --> Migrate[Alembic]
-    Compose --> DB[(PostgreSQL volume)]
-    Nginx --> API
-    API --> DB
-    Migrate --> DB
+flowchart TB
+    Client[API client] -->|DNS lookup| DNS[Cloudflare DNS-only A record]
+    DNS -->|EC2 public IPv4| Client
+    Client -->|HTTPS 443| SG[AWS security group]
+    SG --> Nginx[Nginx TLS termination]
+    Nginx --> API[FastAPI]
+    API --> DB[(PostgreSQL volume)]
+    DDNS[Python DDNS<br/>systemd timer] -->|PATCH A record| DNS
+    IMDS[EC2 IMDSv2] -->|public IPv4| DDNS
+    Parameters[Parameter Store<br/>SecureString] --> DDNS
+    Parameters --> Certbot[Certbot DNS-01<br/>systemd timer]
+    KMS[Customer-managed KMS key] --> Parameters
+    Certbot --> Certs[Let's Encrypt certificates]
+    Certs -->|read-only mount| Nginx
+    Ansible[Ansible over Systems Manager] --> EC2[Amazon Linux 2023 EC2]
+    ECR[Private ECR<br/>digest-pinned image] --> EC2
+    EC2 --> Nginx
+    EC2 --> DDNS
+    EC2 --> Certbot
 ```
 
 GitHub Actions currently validates tests and an image build; it does not
 publish to ECR or deploy to EC2. Image publication and Ansible deployment are
-manual operator workflows.
+manual operator workflows. Cloudflare provides authoritative DNS only; traffic
+connects directly to EC2 rather than passing through the Cloudflare proxy.
+There is no Application Load Balancer or Elastic IP.
 
 See [Architecture](docs/architecture.md) for networks, data relationships,
 startup dependencies, authorization flow, and detailed diagrams.
@@ -229,12 +242,16 @@ The implemented manual workflow is:
 2. An authorized publisher builds the API image for `linux/amd64`.
 3. The image is pushed under an immutable tag and resolved to a digest.
 4. Ansible reaches EC2 through Systems Manager and pulls the exact digest.
-5. A host-side Python script uses the EC2 instance role to decrypt the two
-   application secrets from Parameter Store.
+5. Host-side Python scripts use the EC2 instance role to decrypt application,
+   DDNS, and Certbot secrets from Parameter Store.
 6. Existing credentials are validated before the root-only `.env` is retained
    or reconstructed; mismatches stop the deployment.
-7. Docker Compose starts PostgreSQL, migrations, FastAPI, and Nginx.
-8. Ansible retries readiness until HTTP 200.
+7. Docker Compose starts PostgreSQL, migrations, FastAPI, and Nginx with the
+   certificate directory mounted read-only.
+8. A systemd timer keeps the DNS-only A record synchronized with IMDSv2.
+9. Certbot renews the DNS-01 certificate and validates/reloads Nginx through a
+   deploy hook.
+10. Ansible retries the loopback readiness endpoint until HTTP 200.
 
 The AWS merge uses:
 
@@ -243,12 +260,14 @@ docker-compose.yml + compose.prod.yaml + compose.aws.yaml
 ```
 
 The final override removes PostgreSQL host exposure, uses the pre-pulled ECR
-image for API and migrations, and binds Nginx to EC2 loopback.
+image for API and migrations, publishes HTTPS on host TCP 443, and maps EC2
+host `127.0.0.1:8080` to Nginx container port 80 for readiness checks.
 
 See [AWS Infrastructure](docs/aws-infrastructure.md) and
 [Deployment Runbook](docs/deployment.md) for the verified Windows PowerShell
 commands, ECR publication, Terraform, Ansible, Compose layering, and secure SSM
-port forwarding.
+port forwarding. See [HTTPS and Dynamic DNS](docs/https-ddns.md) for DNS,
+certificate, systemd, rotation, and troubleshooting procedures.
 
 ## CI and Testing
 
@@ -294,6 +313,10 @@ Verified evidence currently includes:
 - Successful comparison of managed secrets with the protected EC2 environment
 - Idempotent Docker Engine and Compose CLI host setup through Ansible
 - Successful EC2 deployment and readiness HTTP 200
+- Public Swagger UI and readiness responses over valid HTTPS
+- Cloudflare DNS-only synchronization with the EC2 public IPv4 address
+- Successful simulated certificate renewal and Nginx reload-hook validation
+- Enabled DDNS and Certbot renewal systemd timers
 - Successful repeat deployment with `changed=1` from the one-shot migration
   container
 
@@ -312,18 +335,21 @@ Implemented controls include:
 - Atomic soft-delete auditing
 - Non-root application container
 - Docker network separation and no AWS PostgreSQL host port
-- Nginx rate limiting and loopback-only AWS binding
+- Nginx rate limiting, TLS 1.2/1.3, and public HTTPS on TCP 443
 - IMDSv2 and encrypted EC2 root storage
-- No inbound security-group rules; administration through Systems Manager
+- Security-group ingress limited to public TCP 443; no public SSH or HTTP
 - Private, encrypted ECR and S3 resources
 - Pull-only ECR permissions for EC2
 - Customer-managed KMS key with automatic key-material rotation
 - KMS-encrypted Parameter Store `SecureString` application secrets
 - Root-only EC2 environment file validated against Parameter Store
+- Root-only Certbot credentials and read-only certificate mounts
 
 Important limitations:
 
-- HTTP only; no public TLS ingress
+- Single EC2 origin with no load balancer, Elastic IP, or high availability
+- Cloudflare is DNS-only, so it does not proxy or protect application traffic
+- Initial certificate issuance is an operator-run step
 - No automated rotation of PostgreSQL or JWT credentials
 - A protected host-local `.env` remains necessary for Docker Compose
 - Local Terraform state
@@ -335,12 +361,12 @@ See [Security](docs/security.md) for the complete control and limitation model.
 
 ## Roadmap
 
-1. Add HTTPS, certificate automation, and controlled public exposure.
+1. Automate clean-host TLS bootstrap and controlled Cloudflare token rotation.
 2. Implement coordinated PostgreSQL and JWT secret rotation and recovery.
 3. Implement PostgreSQL backup, restore, retention, and recovery procedures.
 4. Move Terraform state to an encrypted remote backend with locking.
-5. Automate ECR publication and digest promotion.
-6. Add a reviewed Jenkins or equivalent continuous-deployment workflow.
+5. Automate ECR publication, digest promotion, and reviewed deployment.
+6. Evaluate HSTS and a managed ingress strategy when availability requires it.
 7. Add Prometheus, Grafana, centralized logs, metrics, and alerts.
 8. Parameterize inventory and ECR values and expand deployment/security tests.
 9. Add an optional, low-cost Kubernetes learning environment after the
@@ -357,3 +383,4 @@ See [Security](docs/security.md) for the complete control and limitation model.
 | [Security](docs/security.md) | Application, container, AWS, IAM, secret, and network controls and limitations |
 | [Testing and Validation](docs/testing.md) | Pytest, integration safety, CI, configuration checks, and operator validation |
 | [Technical Decisions](docs/technical-decisions.md) | Engineering rationale and project-specific tradeoffs |
+| [HTTPS and Dynamic DNS](docs/https-ddns.md) | Cloudflare DDNS, Certbot DNS-01, systemd automation, token rotation, and troubleshooting |

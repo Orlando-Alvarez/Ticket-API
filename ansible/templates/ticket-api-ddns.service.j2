@@ -1,0 +1,16 @@
+
+[Unit]
+Description=Synchronize Ticket-API public DNS with EC2
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/ticket-api
+Environment=AWS_DEFAULT_REGION=us-west-2
+ExecStart=/opt/ticket-api/.venv-secrets/bin/python /opt/ticket-api/cloudflare_ddns.py --zone-id {{ cloudflare_zone_id }} --apply
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true

@@ -9,7 +9,7 @@ development. It does not describe the AWS deployment workflow.
 
 - Git
 - Docker Engine or Docker Desktop
-- Docker Compose v2
+- Docker Compose v2.24.4 or later for configurations that use `!override`
 - Python 3.11 or later for direct host development
 
 ## Clone and Configure
@@ -110,6 +110,11 @@ docker compose \
 This removes the PostgreSQL host port, forces FastAPI debug mode off, and
 publishes Nginx on host port 80. It still serves plain HTTP and is not the AWS
 deployment configuration.
+
+Do not add `compose.aws.yaml` to the local workflow. That override expects a
+pre-pulled ECR image, host certificates under `/etc/letsencrypt`, and the AWS
+HTTPS configuration. Cloudflare, Certbot, IMDSv2, and AWS credentials are not
+required for normal local development.
 
 ### Stop Without Deleting Data
 

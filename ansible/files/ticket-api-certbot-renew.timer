@@ -1,0 +1,12 @@
+
+[Unit]
+Description=Schedule Ticket-API certificate renewal
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=12h
+AccuracySec=1min
+Unit=ticket-api-certbot-renew.service
+
+[Install]
+WantedBy=timers.target

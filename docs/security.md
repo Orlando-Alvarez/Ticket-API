@@ -69,16 +69,20 @@ defined.
   output/error.
 - Liveness and readiness endpoints are exempt from rate limiting.
 
-The current Nginx configuration serves HTTP only.
+The AWS Nginx configuration serves TLS 1.2/1.3 on public TCP 443. Its HTTP
+listener is bound to host loopback and exposes only the readiness path; other
+HTTP paths return `404`.
 
 ## Deployment Secret Management
 
 Local development still uses an ignored `.env` file created from
-`.env.example`. The AWS deployment uses two encrypted Systems Manager Parameter
-Store `SecureString` parameters:
+`.env.example`. The AWS deployment uses four encrypted Systems Manager
+Parameter Store `SecureString` parameters:
 
 - `/ticket-api/dev/postgres-password`
 - `/ticket-api/dev/jwt-secret`
+- `/ticket-api/dev/cloudflare-ddns-token`
+- `/ticket-api/dev/cloudflare-certbot-token`
 
 The existing PostgreSQL password and JWT signing secret were preserved when
 the parameters were created. This was a storage migration, not a credential
@@ -87,7 +91,9 @@ rotation, and the PostgreSQL volume was not recreated.
 Parameter Store centralizes the encrypted source values and provides an
 IAM-authorized retrieval path. It does not inject values into Docker
 containers. Docker Compose still reads `/opt/ticket-api/.env`, which is a
-protected host-local copy required by the current Compose design.
+protected host-local copy required by the current Compose design. The DDNS
+token is retrieved for each synchronization and is not written to a local
+credential file. The Certbot token is synchronized to a protected host file.
 
 ### AWS KMS
 
@@ -98,7 +104,7 @@ Terraform manages a customer-managed symmetric key and alias:
 - Alias `alias/ticket-api-dev-secrets` with the current default variables
 
 The key has automatic KMS key-material rotation enabled and a 30-day deletion
-window. The two `SecureString` parameters use this key for encryption.
+window. All four `SecureString` parameters use this key for encryption.
 
 KMS key rotation changes the backing cryptographic material used by AWS. It
 does **not** change the PostgreSQL password, replace the JWT signing secret, or
@@ -131,6 +137,23 @@ database defaults, and environment-file location. Secret values must match
 state, but creation and migration are not fully reproducible from this
 repository.
 
+### Cloudflare Credential Handling
+
+The DDNS and certificate workflows use separate tokens with different
+operational purposes:
+
+- `cloudflare_ddns.py` retrieves its token with `WithDecryption=True` on each
+  systemd run, validates that the A record is DNS-only, and changes it only
+  when the IMDSv2 public IPv4 differs.
+- `sync_certbot_credentials.py` retrieves the Certbot token with
+  `WithDecryption=True` and atomically synchronizes
+  `/etc/ticket-api/cloudflare-certbot.ini`. The directory is mode `0700` and
+  the credentials file is mode `0600`.
+
+Both scripts use the EC2 instance role rather than static AWS credentials.
+They run as root, so host root compromise remains inside the trust boundary.
+The tokens should be scoped to the required Cloudflare zone and DNS actions.
+
 ## AWS Identity Separation
 
 | Identity | Current responsibility |
@@ -138,7 +161,7 @@ repository.
 | `ticketapi-tf` | Assumes the Terraform deployer role |
 | `ticketapi-dev` | Starts SSM sessions and accesses the Ansible transfer bucket |
 | Authorized publisher profile | Authenticates and pushes to private ECR |
-| EC2 instance role | Registers with SSM, pulls from ECR, and decrypts the two deployment secrets |
+| EC2 instance role | Registers with SSM, pulls from ECR, and decrypts the four deployment secrets |
 
 The EC2 role is named `ticket-api-dev-ec2-ssm-role` with the current defaults.
 It uses AWS-managed Systems Manager core and ECR pull-only policies plus the
@@ -146,11 +169,11 @@ Terraform-managed `aws_iam_role_policy.ec2_secrets_read` inline policy. No
 static AWS keys are stored on EC2.
 
 The custom policy permits `ssm:GetParameter` and `ssm:GetParameters` only for
-the two expected parameter ARNs. Its KMS statement permits `kms:Decrypt` only
+the four expected parameter ARNs. Its KMS statement permits `kms:Decrypt` only
 for the designated key, through the regional SSM service, and for matching
 parameter-ARN encryption contexts.
 
-This does not mean every permission on the role is restricted to those two
+This does not mean every permission on the role is restricted to those four
 parameter ARNs. In particular, the AWS-managed
 `AmazonSSMManagedInstanceCore` policy has its own broader SSM-related
 permissions required for managed-instance operation. Effective permissions
@@ -191,21 +214,39 @@ Session Manager Plugin, Boto3, Botocore, and CRT authentication support.
 Image signing, provenance attestations, vulnerability gates, and automated
 promotion are not implemented.
 
+## TLS and Certificate Handling
+
+- Nginx terminates TLS for `api.orlandoalvarez.dev` using TLS 1.2 or 1.3.
+- Let's Encrypt certificates are issued with the Cloudflare DNS-01 plugin.
+- `/etc/letsencrypt` is mounted read-only into the Nginx container.
+- A root-run systemd timer invokes Certbot every 12 hours; Certbot renews only
+  when the certificate is due.
+- The renewal service refreshes the root-only Cloudflare credentials before
+  each attempt.
+- The deploy hook runs `nginx -t` inside the container before reloading Nginx.
+
+Initial certificate issuance is manual. HSTS is not configured, and Cloudflare
+is DNS-only, so Cloudflare proxy, WAF, CDN, and edge-TLS protections do not
+apply. TLS availability depends on the single EC2 host, its certificate files,
+and the Nginx container.
+
 ## AWS Network Boundary
 
 - EC2 resides in the public subnet and has a public IP.
-- The security group has no ingress-rule resources: neither HTTP nor SSH is
-  accepted from the internet.
+- The security group accepts public TCP 443 and has no public HTTP or SSH rule.
 - The security group retains unrestricted outbound IPv4 connectivity required
-  for AWS APIs, ECR, package retrieval, and other current host dependencies.
-- The AWS Compose override binds Nginx only to `127.0.0.1:8080`.
+  for AWS APIs, ECR, package retrieval, Cloudflare, ACME, and other current
+  host dependencies.
+- The AWS Compose override publishes Nginx on port 443 and binds HTTP only to
+  `127.0.0.1:8080`.
 - PostgreSQL has no host port in the AWS merge.
 - Temporary access can use SSM port forwarding.
 
-Public HTTP access is intentionally disabled. HTTPS, a custom domain, and a
-controlled public ingress path are not implemented. A public IP and outbound
-internet route remain, so this boundary alone does not make the environment
-production-ready. Do not expose PostgreSQL for troubleshooting.
+Public HTTP and SSH are intentionally disabled. The public DNS-only record
+points directly to a non-elastic EC2 address; no Application Load Balancer or
+Elastic IP is present. DDNS reduces address-change downtime but cannot remove
+DNS propagation delays or provide high availability. Do not expose PostgreSQL
+for troubleshooting.
 
 ## Manually Validated Controls
 
@@ -219,6 +260,10 @@ Operator-run checks have confirmed:
 - Comparison of Parameter Store values with the protected EC2 environment
 - Ansible deployment using the existing ECR image and the EC2 instance role
 - Docker Compose startup and database readiness through Nginx
+- Public Swagger and readiness responses over valid HTTPS
+- Cloudflare DNS synchronization with the EC2 public IPv4 address
+- Successful simulated certificate renewal and deploy-hook reload
+- Enabled DDNS and certificate-renewal systemd timers
 
 These are manual deployment checks, not GitHub Actions jobs, penetration-test
 results, compliance certifications, or automated secret-rotation evidence.
@@ -235,15 +280,17 @@ results, compliance certifications, or automated secret-rotation evidence.
 
 ## Outstanding Security Work
 
-1. Add HTTPS and certificate automation before public exposure.
-2. Implement coordinated PostgreSQL and JWT secret rotation and recovery.
-3. Parameterize secret paths and region, and manage the migration lifecycle
+1. Automate clean-host certificate issuance and Cloudflare token rotation.
+2. Evaluate HSTS and managed ingress when availability requirements justify
+   them.
+3. Implement coordinated PostgreSQL and JWT secret rotation and recovery.
+4. Parameterize secret paths and region, and manage the migration lifecycle
    reproducibly without storing plaintext in Terraform state.
-4. Move Terraform state to an encrypted remote backend with locking.
-5. Bring remaining manual IAM permissions under reviewed code.
-6. Define PostgreSQL backups, restore testing, retention, and disaster
+5. Move Terraform state to an encrypted remote backend with locking.
+6. Bring remaining manual IAM permissions under reviewed code.
+7. Define PostgreSQL backups, restore testing, retention, and disaster
    recovery.
-7. Add centralized logs, metrics, dashboards, and alerts.
-8. Add automated dependency, container, deployment, and security checks.
-9. Evaluate image signing and provenance after publication is automated.
+8. Add centralized logs, metrics, dashboards, and alerts.
+9. Add automated dependency, container, deployment, and security checks.
+10. Evaluate image signing and provenance after publication is automated.
 

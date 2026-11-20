@@ -27,13 +27,13 @@ names are not embedded in Terraform.
 | Internet Gateway | Attached to the VPC |
 | Public route table | `0.0.0.0/0` through the Internet Gateway |
 | Private route table | No public default route or NAT gateway |
-| Security group | No ingress rules; unrestricted outbound IPv4 connectivity |
+| Security group | Public TCP 443 ingress, no HTTP/SSH ingress, unrestricted outbound IPv4 connectivity |
 | EC2 | Amazon Linux 2023, `t2.small` default, public subnet, public IP |
 | Root storage | Encrypted 16 GiB gp3, deleted on instance termination |
 | Instance metadata | IMDSv2 tokens required |
 | IAM role/profile | Systems Manager core, pull-only ECR, and scoped secret-read access |
 | AWS KMS | Customer-managed symmetric key, automatic key-material rotation, alias, and 30-day deletion window |
-| Parameter Store | Two KMS-encrypted `SecureString` application secrets created during migration |
+| Parameter Store | Four KMS-encrypted `SecureString` values for the application, DDNS, and Certbot |
 | Amazon ECR | Private repository, immutable tags, scan on push, AES-256 encryption |
 | ECR lifecycle | Retains the 10 most recent images |
 | Amazon S3 | Private Ansible transfer bucket, AES-256 encryption, one-day expiration |
@@ -55,16 +55,38 @@ With the default project and environment values, the alias is
 
 - `/ticket-api/dev/postgres-password`
 - `/ticket-api/dev/jwt-secret`
+- `/ticket-api/dev/cloudflare-ddns-token`
+- `/ticket-api/dev/cloudflare-certbot-token`
 
-The parameters were populated with the application's existing credentials.
-The migration did not rotate the database password or JWT signing secret and
-did not recreate PostgreSQL. The parameter values are not defined by
+The first two parameters were populated with the application's existing
+credentials. That migration did not rotate the database password or JWT
+signing secret and did not recreate PostgreSQL. The Cloudflare parameters
+provide separate credentials for A-record synchronization and Certbot DNS-01
+challenges. Parameter values are not defined by
 `aws_ssm_parameter` resources in this repository. This avoids placing their
 plaintext values in Terraform state, but it also means parameter creation and
 initial value migration are not fully reproducible from the Terraform files.
 
 Automatic KMS rotation rotates key material, not application credentials.
 PostgreSQL and JWT secret rotation remains an operational feature to design.
+
+## Public HTTPS and Dynamic DNS
+
+Terraform declares `aws_vpc_security_group_ingress_rule.https`, allowing
+public TCP 443 to the EC2 security group. Port 22 remains closed and there is
+no public port 80 rule. The AWS Compose override publishes container port 443
+on the host and binds container port 80 only to `127.0.0.1:8080`.
+
+The instance has an automatically assigned public IPv4 address rather than an
+Elastic IP. Cloudflare hosts a DNS-only A record for
+`api.orlandoalvarez.dev`; it is not acting as a reverse proxy, CDN, WAF, or TLS
+endpoint. A host-side Python service reads the current address from IMDSv2 and
+updates the existing A record through the Cloudflare API when it changes.
+
+Nginx terminates TLS on EC2 using Let's Encrypt certificates issued through a
+Certbot DNS-01 challenge. The certificate directory is mounted read-only into
+the Nginx container. See [HTTPS and Dynamic DNS](https-ddns.md) for the
+operational flow and recovery procedures.
 
 ## Pinned Amazon Linux AMI
 
@@ -119,15 +141,18 @@ verified in the project's Windows PowerShell environment; the unquoted
 Review the saved plan before applying it. The workflow does not use
 `-auto-approve`.
 
-The most recently recorded operator verification reported:
+A recorded operator verification for the preceding security-hardening stage
+reported:
 
 ```text
 terraform validate: successful
 terraform plan: No changes. Your infrastructure matches the configuration.
 ```
 
-These are operator-provided results. Repeat validation and planning before any
-future infrastructure change.
+These are point-in-time, operator-provided results. The public HTTPS endpoint
+has since been verified, but no current Terraform plan output is stored in the
+repository. Repeat validation and planning against the local configuration
+before any future infrastructure change.
 
 ## Outputs
 
@@ -176,7 +201,7 @@ separate, controlled IAM-bootstrap process with reviewed least-privilege
 policies. Do not compensate by granting broad administrator access.
 
 The custom EC2 inline policy allows `ssm:GetParameter` and
-`ssm:GetParameters` for only the two calculated parameter ARNs. It allows
+`ssm:GetParameters` for only the four calculated parameter ARNs. It allows
 `kms:Decrypt` only against the project KMS key and constrains use to the
 regional SSM service and matching `PARAMETER_ARN` encryption contexts.
 
@@ -219,6 +244,10 @@ issues, or pull requests.
   [AWS Systems Manager pricing](https://aws.amazon.com/systems-manager/pricing/).
 - EC2, EBS, public IPv4, S3, data transfer, and related service usage remain
   billable independently of this secret-management design.
+- Cloudflare plan or domain charges, if applicable, remain external to AWS.
+  Let's Encrypt does not add an AWS certificate-service charge, but the host,
+  public IPv4, DNS traffic, and automation still consume their respective
+  services.
 
 Pricing changes over time. The repository intentionally does not embed a
 fixed monthly cost estimate.
@@ -231,8 +260,13 @@ fixed monthly cost estimate.
 - Inventory and ECR registry values are environment-specific.
 - The private subnet has no NAT gateway and hosts no workload.
 - There is no managed database service.
-- There is no load balancer, HTTPS listener, or certificate automation.
+- There is no load balancer, Elastic IP, managed certificate service, or
+  high-availability ingress.
+- Initial certificate issuance is an operator-run step; only renewal is
+  automated by the repository files.
+- Public reachability depends on DDNS correcting the A record after an EC2
+  public-address change and on DNS cache expiration.
 - Backups, recovery, monitoring, and alerting are not provisioned.
-- The security group has no ingress rules, and Nginx is bound to EC2 loopback;
-  public HTTP and HTTPS access are intentionally unavailable.
+- Cloudflare is configured as DNS-only, so client traffic reaches the EC2
+  origin directly and does not receive Cloudflare proxy protections.
 

@@ -7,8 +7,8 @@ claim that the selected tools are universally preferable.
 
 ## Terraform for Infrastructure Provisioning
 
-**Decision:** Define the AWS network, EC2 host, IAM attachments, ECR repository,
-and S3 transfer bucket with Terraform.
+**Decision:** Define the AWS network, EC2 host, security group, IAM attachments,
+KMS key, ECR repository, and S3 transfer bucket with Terraform.
 
 **Benefits**
 
@@ -170,14 +170,64 @@ consistency.
 
 - Keeps the API container unexposed.
 - Centralizes forwarding headers, timeouts, logging, and rate limiting.
-- Provides a future TLS ingress boundary.
+- Terminates TLS 1.2/1.3 at a single controlled ingress boundary.
+- Keeps internal readiness available on an EC2 loopback-only HTTP listener.
 
 **Tradeoffs**
 
-- TLS is not configured.
 - Rate limiting is instance-local.
-- The AWS override currently binds Nginx only to loopback, so public access
-  requires a future ingress decision.
+- Certificate files and the private key must exist on the EC2 host.
+- There is no managed load balancer, certificate service, or high-availability
+  ingress.
+- HSTS is not currently configured.
+
+## Cloudflare DNS-Only DDNS Instead of an Elastic IP or ALB
+
+**Decision:** Publish a DNS-only Cloudflare A record and synchronize it with
+the EC2 public IPv4 address through a Python systemd service. Do not provision
+an Elastic IP or Application Load Balancer at the current project scale.
+
+**Benefits**
+
+- Keeps the public hostname stable when the automatically assigned EC2 address
+  changes.
+- Reads the authoritative instance address through IMDSv2 rather than an
+  external IP-discovery service.
+- Uses a zone-scoped token from Parameter Store through the EC2 role.
+- Avoids the additional architecture and cost of an ALB for a single-host
+  portfolio deployment.
+- Updates only an existing, DNS-only A record and supports a no-write dry run.
+
+**Tradeoffs**
+
+- DNS cache expiration creates a recovery window after an address change.
+- Cloudflare does not proxy, cache, filter, or terminate TLS for the API.
+- The EC2 origin remains directly reachable on TCP 443.
+- The timer, Cloudflare API, IMDSv2, IAM, KMS, and Parameter Store must all be
+  healthy for automatic correction.
+- This design does not provide load balancing, failover, or high availability.
+
+## Let's Encrypt DNS-01 and Host-Managed Certbot
+
+**Decision:** Issue the domain certificate with Certbot's Cloudflare DNS-01
+plugin, store certificate material on EC2, and mount `/etc/letsencrypt`
+read-only into Nginx.
+
+**Benefits**
+
+- Does not require public port 80 for ACME validation.
+- Supports automatic renewal through a dedicated systemd timer.
+- Refreshes the root-only Cloudflare credentials before renewal.
+- Validates Nginx configuration before the deploy hook reloads the container.
+
+**Tradeoffs**
+
+- Initial certificate issuance is an operator-run step.
+- The EC2 host stores the certificate private key and a protected local copy of
+  the Certbot token.
+- Availability depends on one host, Let's Encrypt, Cloudflare DNS, and the
+  renewal automation.
+- There is no ACM-managed termination or centralized certificate lifecycle.
 
 ## Layered Compose Files
 
@@ -214,26 +264,30 @@ image publication, and runtime pull access.
 
 ## Parameter Store and KMS for Deployment Secrets
 
-**Decision:** Preserve the existing PostgreSQL and JWT credentials in
-Parameter Store `SecureString` parameters encrypted with a customer-managed KMS
-key. Synchronize them to the EC2 host before Docker Compose starts.
+**Decision:** Preserve the PostgreSQL and JWT credentials and store separate
+Cloudflare DDNS and Certbot tokens in Parameter Store `SecureString` parameters
+encrypted with a customer-managed KMS key. Retrieve them on EC2 through its
+instance role.
 
 **Benefits**
 
 - Removes the managed source values from playbooks and controller-side files.
 - Uses the EC2 instance role instead of static AWS access keys.
-- Restricts the custom read policy to the two expected parameter ARNs and the
+- Restricts the custom read policy to the four expected parameter ARNs and the
   custom decrypt policy to the project key, regional SSM service, and matching
   encryption contexts.
 - Stops deployment when an existing local environment file disagrees with the
   managed values.
 - Keeps the current Compose contract without giving application containers AWS
   permissions.
+- Gives DDNS and Certbot separate credentials and host-side workflows.
 
 **Tradeoffs**
 
 - Docker Compose still needs a root-owned `0600` `.env`; Parameter Store is not
   consumed directly by the containers.
+- Certbot needs a root-only local credentials file; the DDNS token is retrieved
+  for each run instead of being persisted.
 - The parameters and their values are not Terraform-managed. This keeps secret
   plaintext out of Terraform state but leaves the initial migration less
   reproducible.

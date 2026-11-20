@@ -1,0 +1,59 @@
+
+---
+- name: Configure Cloudflare Dynamic DNS
+  hosts: ticket_api
+  become: true
+  gather_facts: false
+
+  vars:
+    deploy_dir: /opt/ticket-api
+
+  tasks:
+    - name: Validate Cloudflare Zone ID
+      ansible.builtin.assert:
+        that:
+          - cloudflare_zone_id is defined
+          - cloudflare_zone_id is match('^[0-9a-fA-F]{32}$')
+        fail_msg: "A valid cloudflare_zone_id is required"
+
+    - name: Check secrets Python environment
+      ansible.builtin.stat:
+        path: "{{ deploy_dir }}/.venv-secrets/bin/python"
+      register: secrets_python
+
+    - name: Require existing Python environment
+      ansible.builtin.assert:
+        that:
+          - secrets_python.stat.exists
+        fail_msg: "Deploy the application environment first"
+
+    - name: Install Cloudflare DDNS script
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/cloudflare_ddns.py"
+        dest: "{{ deploy_dir }}/cloudflare_ddns.py"
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Install DDNS systemd service
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/ticket-api-ddns.service.j2"
+        dest: /etc/systemd/system/ticket-api-ddns.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install DDNS systemd timer
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/ticket-api-ddns.timer"
+        dest: /etc/systemd/system/ticket-api-ddns.timer
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Enable and start DDNS timer
+      ansible.builtin.systemd_service:
+        name: ticket-api-ddns.timer
+        enabled: true
+        state: started
+        daemon_reload: true

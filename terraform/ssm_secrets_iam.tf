@@ -2,7 +2,9 @@
 locals {
   secret_names = [
     "/${var.project_name}/${var.environment}/postgres-password",
-    "/${var.project_name}/${var.environment}/jwt-secret"
+    "/${var.project_name}/${var.environment}/jwt-secret",
+    "/${var.project_name}/${var.environment}/cloudflare-ddns-token",
+    "/${var.project_name}/${var.environment}/cloudflare-certbot-token"
   ]
 
   secret_arns = [
