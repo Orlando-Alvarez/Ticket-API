@@ -2,8 +2,9 @@
 
 [Back to the main README](../README.md)
 
-This runbook covers the implemented manual image-publication and
-Ansible-deployment workflow. It does not represent continuous delivery.
+This runbook covers the configured GitHub Actions image-publication path, the
+verified manual publication fallback, and the operator-controlled Ansible
+deployment workflow. It does not represent continuous deployment.
 
 ## Current Deployment Boundary
 
@@ -55,7 +56,56 @@ Replace both placeholders with the real repository URI and a valid lowercase
 `pull_policy: never`, so that exact image must already exist in the EC2 Docker
 image store.
 
-## Publish the API Image to ECR
+## Automated ECR Publication
+
+The GitHub Actions workflow is configured to publish an image only when all of
+the following are true:
+
+1. The event is a direct push.
+2. The ref is `refs/heads/main`.
+3. Application tests and Ruff pass.
+4. PostgreSQL migrations and integration tests pass.
+5. The independent Docker build job succeeds.
+
+The publication job requests a GitHub OIDC token, assumes the
+Terraform-managed ECR publisher role, authenticates to the private registry,
+and builds and pushes this immutable tag:
+
+```text
+sha-<full Git commit SHA>
+```
+
+The AWS trust policy accepts only this repository's `main` branch, and the
+role's publication permissions are scoped to the Ticket-API ECR repository.
+The OIDC provider, publisher role, and inline policy have been applied through
+Terraform and operator-verified. GitHub does not need a stored AWS access key
+or secret access key.
+
+GitHub role assumption and automatic image publication are **configured but
+not yet verified by a successful main-branch workflow run**. The job also
+rebuilds the image instead of promoting the image from the preceding Docker
+build job. A future build-once design should attach one immutable artifact to
+the validation and publication stages.
+
+After a successful publication, resolve the commit tag to a digest before
+deployment:
+
+```bash
+IMAGE_TAG="sha-<full-commit-sha>"
+
+aws ecr describe-images \
+  --repository-name ticket-api \
+  --image-ids "imageTag=${IMAGE_TAG}" \
+  --query 'imageDetails[0].imageDigest' \
+  --output text \
+  --region us-west-2
+```
+
+Do not deploy a mutable name or copy an unverified digest from logs. Record the
+selected commit, tag, and digest in the deployment evidence. See
+[CI/CD and Image Delivery](ci-cd.md) for workflow and federation details.
+
+## Manual ECR Publication Fallback
 
 ### Prerequisites
 
@@ -412,11 +462,14 @@ The second full deployment was not completely unchanged because the one-shot
 Alembic migration container ran again. Other idempotent tasks skipped work when
 their desired state was already satisfied.
 
-These are operator-run validations, not GitHub Actions results.
+These are operator-run validations, not proof that the GitHub OIDC publication
+job has executed successfully.
 
 ## Current Deployment Limitations
 
-- Publication and deployment are manual.
+- GitHub role assumption and automatic publication are configured but not yet
+  run-verified; the documented manual publisher remains the verified fallback.
+- Deployment and digest selection remain manual operator actions.
 - ECR registry values are environment-specific in the current playbooks.
 - The inventory uses a static EC2 instance ID.
 - Nginx terminates TLS on one EC2 instance; there is no load balancer, Elastic

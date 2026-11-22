@@ -3,19 +3,26 @@
 [Back to the main README](../README.md)
 
 Ticket-API separates fast application tests, PostgreSQL integration tests,
-Continuous Integration, and manual infrastructure/deployment validation.
+Continuous Integration, configured image publication, and manual
+infrastructure/deployment validation.
 
 ## Static Analysis
+
+```bash
+python -m ruff check app tests ansible/files/cloudflare_ddns.py
+```
+
+This is the scope enforced by GitHub Actions. A broader repository check is
+also useful during maintenance:
 
 ```bash
 python -m ruff check .
 ```
 
-GitHub Actions scopes Ruff to the application, tests, and the DDNS script:
-
-```bash
-python -m ruff check app tests ansible/files/cloudflare_ddns.py
-```
+At the time of this documentation review, the broader command reports three
+pre-existing findings in `ansible/files/sync_certbot_credentials.py`; that
+file is outside the CI Ruff scope. The enforced CI command passes. This gap
+should be fixed in a separate code change rather than hidden by documentation.
 
 ## Application Test Suite
 
@@ -105,8 +112,25 @@ on pushes to `main` and `feat/**`, and pull requests targeting `main`.
 - Depends on both test jobs
 - Builds `ticket-api:ci`
 
-The workflow does not publish to ECR, run Terraform or Ansible, or deploy to
-AWS. It is Continuous Integration, not Continuous Deployment.
+### ECR Publication Job
+
+- Depends on the Docker build job
+- Runs only for a direct push to `main`
+- Requests `id-token: write` at the job level
+- Assumes a Terraform-managed AWS role through GitHub OIDC
+- Authenticates to the private ECR registry
+- Rebuilds and pushes `sha-<full-commit-sha>`
+
+The applied and operator-verified OIDC trust policy limits role assumption to
+this repository's `main` branch. The role can push to the Ticket-API
+repository, while the EC2 runtime role remains pull-only. Actual GitHub role
+assumption and automatic publication have not yet been verified by a
+successful main-branch run.
+
+The workflow does not run Terraform or Ansible and does not deploy to EC2. It
+provides Continuous Integration and a gated image-publication step, not
+Continuous Deployment. See [CI/CD and Image Delivery](ci-cd.md) for the full
+boundary.
 
 ## Configuration Validation
 
@@ -207,7 +231,9 @@ migration container ran again. It is inaccurate to describe the complete
 deployment as unchanged.
 
 These validations are not CI jobs and should not be represented as automated
-release evidence.
+release evidence. In particular, the previously verified manual ECR
+publication does not prove that GitHub OIDC federation has executed
+successfully.
 
 No automated test currently exercises live KMS, Parameter Store, IAM,
 Cloudflare, ACME, systemd, or certificate renewal. DDNS unit tests mock external
@@ -222,7 +248,8 @@ portfolio evidence would include:
 
 1. Swagger UI showing the real endpoint groups.
 2. A redacted authenticated API response.
-3. GitHub Actions showing all three CI jobs passing.
+3. GitHub Actions showing the three validation/build jobs passing and, after
+   verification on `main`, the conditional ECR publication job.
 4. Ansible recap for the first and repeat deployment.
 5. Public Swagger and readiness responses with certificate details redacted.
 6. ECR repository settings showing immutable tags and scan on push, with

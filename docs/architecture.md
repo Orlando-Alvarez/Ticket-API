@@ -13,9 +13,10 @@ Ticket-API currently has three distinct operating contexts:
    PostgreSQL.
 2. **Local containers:** Docker Compose builds the API image and runs
    PostgreSQL, migrations, FastAPI, and Nginx.
-3. **AWS deployment:** Terraform provisions infrastructure, a prebuilt API
-   image is distributed through private ECR, and Ansible deploys the Compose
-   stack to EC2 through AWS Systems Manager.
+3. **AWS deployment:** Terraform provisions infrastructure, GitHub Actions is
+   configured to publish a commit-tagged image to private ECR after the
+   main-branch quality gates, and Ansible deploys a selected image digest to
+   EC2 through AWS Systems Manager.
 
 The AWS deployment is publicly reachable at
 `https://api.orlandoalvarez.dev`. Nginx publishes HTTPS on TCP 443 while its
@@ -55,6 +56,27 @@ flowchart LR
 The repository does not currently use a separate service layer. Business
 authorization is enforced in route modules, while persistence operations live
 in CRUD modules.
+
+### Request Lifecycle
+
+1. Nginx forwards an API request to Uvicorn/FastAPI and preserves forwarding
+   headers.
+2. FastAPI matches the versioned route and resolves dependencies.
+3. Pydantic validates path, query, form, or JSON input before route logic runs.
+4. Protected routes decode the bearer JWT, load the current user through the
+   request-scoped database session, and reject inactive or unknown users.
+5. The route applies its admin, owner, reporter, requester, or assignee policy.
+6. A CRUD function performs the SQLAlchemy query or mutation and commits only
+   the intended transaction.
+7. A response schema serializes the public fields. Password hashes and
+   internal credentials are never response fields.
+8. Application and framework exception handlers normalize errors into the
+   documented JSON envelope without returning SQL or connection details.
+
+OpenAPI, Swagger UI, and ReDoc are generated from the same route and schema
+definitions. The endpoint summary in the main README is intentionally brief;
+the deployed [Swagger UI](https://api.orlandoalvarez.dev/docs) is the detailed
+interactive API reference.
 
 ## Authentication and Authorization Flow
 
@@ -117,6 +139,12 @@ erDiagram
 Incident severity and status are constrained in both Pydantic and PostgreSQL.
 Incident listing uses a reporter/creation/index ordering strategy and supports
 status, severity, offset, and limit.
+
+Alembic owns the PostgreSQL schema history. The migration chain creates the
+initial users, tickets, and incidents tables; adds Incident constraints and
+indexes; and adds audited soft-delete fields and foreign keys. Application
+startup does not call SQLAlchemy metadata creation in production; the one-shot
+Compose migration service applies `alembic upgrade head` before FastAPI.
 
 ## Soft Deletion
 
@@ -191,6 +219,9 @@ flowchart TB
     Client -->|HTTPS 443| SG[Security group]
     SG --> EC2
     AWS --> ECR[Private Amazon ECR]
+    Actions[GitHub Actions<br/>push to main] -->|OIDC token| OIDC[IAM OIDC provider]
+    OIDC --> Publisher[GitHub ECR<br/>publisher role]
+    Publisher -->|repository-scoped push| ECR
     AWS --> Parameters[Parameter Store<br/>SecureString]
     AWS --> KMS[Customer-managed KMS key]
     Parameters -->|encrypted with| KMS
@@ -215,7 +246,9 @@ hosts no workload. No Application Load Balancer or Elastic IP is provisioned.
 
 ```mermaid
 flowchart LR
-    Publisher[Authorized image publisher] -->|linux/amd64| ECR[Private ECR<br/>immutable tag]
+    Change[Push to main] --> CI[GitHub Actions quality gates]
+    CI --> OIDC[OIDC role assumption]
+    OIDC -->|build and push<br/>sha-commit tag| ECR[Private ECR<br/>immutable tag]
     ECR -->|sha256 digest| Image[Local image on EC2]
     Ansible[Ansible controller] -->|SSM| Deploy[Deployment automation on EC2]
     Deploy --> Sync[Host-side Boto3<br/>secret synchronization]
@@ -239,6 +272,16 @@ flowchart LR
     Migrate --> DB
 ```
 
+The workflow requests permission to mint an OIDC token only in the ECR
+publication job. AWS accepts the role session only for this repository's
+`main` branch, and the resulting policy can publish to the Ticket-API
+repository rather than to arbitrary ECR repositories. The OIDC provider,
+publisher role, and inline policy have been applied and operator-verified. The
+configured job rebuilds the image and publishes `sha-${GITHUB_SHA}` after the
+application, integration, and Docker-build jobs succeed, but actual role
+assumption and automatic publication have not yet been verified by a
+successful main-branch workflow run.
+
 The API and migration services use the same ECR image. The image is pulled
 before Compose runs and is selected through
 `TICKET_API_IMAGE=<repository>@sha256:<digest>`. Compose does not build or pull
@@ -255,7 +298,7 @@ The following components are not implemented:
 
 - Automated clean-host certificate bootstrap
 - Automated PostgreSQL and JWT secret rotation
-- Automated image publication and continuous deployment
+- Build-once artifact promotion, reviewed deployment, and automated rollback
 - Centralized metrics, logs, dashboards, and alerts
 - Remote Terraform state and locking
 - PostgreSQL backup and disaster recovery

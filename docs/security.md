@@ -160,7 +160,8 @@ The tokens should be scoped to the required Cloudflare zone and DNS actions.
 | --- | --- |
 | `ticketapi-tf` | Assumes the Terraform deployer role |
 | `ticketapi-dev` | Starts SSM sessions and accesses the Ansible transfer bucket |
-| Authorized publisher profile | Authenticates and pushes to private ECR |
+| GitHub ECR publisher role | Accepts short-lived OIDC sessions only from this repository's `main` branch and pushes to its ECR repository |
+| Authorized publisher profile | Supports the verified manual ECR publication fallback |
 | EC2 instance role | Registers with SSM, pulls from ECR, and decrypts the four deployment secrets |
 
 The EC2 role is named `ticket-api-dev-ec2-ssm-role` with the current defaults.
@@ -210,6 +211,25 @@ Session Manager Plugin, Boto3, Botocore, and CRT authentication support.
 - A lifecycle policy keeps the 10 most recent images.
 - Deployments select an exact SHA-256 digest.
 - EC2 receives pull-only access.
+
+### GitHub Actions Publication Trust
+
+The workflow does not require a stored AWS access key. The ECR publication job
+requests `id-token: write`, exchanges the GitHub-issued token for a short-lived
+AWS role session, and authenticates to ECR. Other jobs inherit only
+`contents: read`.
+
+Terraform constrains role assumption with the OIDC audience and the exact
+subject for `Orlando-Alvarez/Ticket-API` on `refs/heads/main`. The role policy
+grants the registry authentication action and limits image upload operations
+to the Ticket-API repository. This identity is separate from the pull-only EC2
+role and the Terraform provisioning role.
+
+The OIDC provider, dedicated role, and inline ECR policy have been applied
+through Terraform and operator-verified. GitHub role assumption and automatic
+publication have not yet been verified by a successful main-branch run. Until
+that evidence exists, the pipeline path must not be described as operationally
+verified.
 
 Image signing, provenance attestations, vulnerability gates, and automated
 promotion are not implemented.
@@ -265,8 +285,9 @@ Operator-run checks have confirmed:
 - Successful simulated certificate renewal and deploy-hook reload
 - Enabled DDNS and certificate-renewal systemd timers
 
-These are manual deployment checks, not GitHub Actions jobs, penetration-test
-results, compliance certifications, or automated secret-rotation evidence.
+These are manual deployment checks, not proof of successful GitHub OIDC
+federation, penetration-test results, compliance certifications, or automated
+secret-rotation evidence.
 
 ## Infrastructure Data
 
@@ -292,5 +313,6 @@ results, compliance certifications, or automated secret-rotation evidence.
    recovery.
 8. Add centralized logs, metrics, dashboards, and alerts.
 9. Add automated dependency, container, deployment, and security checks.
-10. Evaluate image signing and provenance after publication is automated.
+10. Verify OIDC publication, then add image signing, provenance, and promotion
+    controls.
 

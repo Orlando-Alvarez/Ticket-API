@@ -17,7 +17,14 @@ infrastructure exists.
 The provider uses the standard AWS credential chain; credentials and profile
 names are not embedded in Terraform.
 
-## Provisioned Resources
+## Terraform Resource Inventory
+
+The table describes the resources represented by the current Terraform root
+module. The baseline network, compute, runtime IAM, KMS, Parameter Store, ECR,
+and S3 design has operator-reported deployment evidence. The GitHub OIDC
+provider, dedicated publisher role, and inline ECR policy have also been
+applied through Terraform and operator-verified. Actual role assumption and
+automatic publication from GitHub Actions remain unverified.
 
 | Resource | Implemented configuration |
 | --- | --- |
@@ -36,6 +43,8 @@ names are not embedded in Terraform.
 | Parameter Store | Four KMS-encrypted `SecureString` values for the application, DDNS, and Certbot |
 | Amazon ECR | Private repository, immutable tags, scan on push, AES-256 encryption |
 | ECR lifecycle | Retains the 10 most recent images |
+| GitHub OIDC provider | Trusts tokens issued by GitHub Actions for the AWS STS audience |
+| GitHub ECR publisher role | Trusts only this repository's `main` branch and can push only to the Ticket-API ECR repository |
 | Amazon S3 | Private Ansible transfer bucket, AES-256 encryption, one-day expiration |
 
 The private subnet currently hosts no project workload. The S3 bucket exists
@@ -114,6 +123,32 @@ Alternatively:
 $env:TF_VAR_ec2_ami_id = "ami-REPLACE_WITH_VALID_AMI"
 ```
 
+## GitHub OIDC and ECR Publication
+
+Terraform defines an IAM OpenID Connect provider for GitHub Actions and a
+dedicated ECR publisher role. The role's trust policy requires both:
+
+- Audience: `sts.amazonaws.com`
+- Subject: `repo:Orlando-Alvarez/Ticket-API:ref:refs/heads/main`
+
+This prevents pull requests, feature branches, forks, and other repositories
+from satisfying the configured trust relationship. The attached inline policy
+allows `ecr:GetAuthorizationToken`, which AWS requires with resource `*`, and
+limits the remaining repository operations used for publication to the
+Ticket-API ECR repository ARN.
+
+The GitHub workflow requests `id-token: write` only for its publication job.
+It does not store a long-lived AWS access key or secret access key in GitHub.
+On a push to `main`, and only after the test, PostgreSQL integration, and Docker
+build jobs succeed, it is configured to build and push an immutable
+`sha-<full-commit-sha>` tag.
+
+The OIDC provider, publisher role, and inline policy have been applied and
+operator-verified in AWS. A successful main-branch workflow execution has not
+yet verified that GitHub can assume the role and publish an image. This
+distinction separates infrastructure evidence from pipeline evidence. See
+[CI/CD and Image Delivery](ci-cd.md) for the end-to-end job flow.
+
 ## Terraform Workflow on Windows PowerShell
 
 Run these commands from the repository root:
@@ -172,7 +207,8 @@ change.
 | --- | --- |
 | `ticketapi-tf` | Assumes `TicketAPI-Terraform-Deployer` to provision represented resources |
 | `ticketapi-dev` | Runs Ansible through SSM and accesses the dedicated transfer bucket |
-| Authorized publisher profile | Authenticates and pushes images to ECR |
+| GitHub ECR publisher role | Accepts short-lived OIDC sessions from this repository's `main` branch and pushes only to its ECR repository |
+| Authorized publisher profile | Supports the documented manual publication fallback |
 | EC2 instance role | Registers with SSM, pulls from ECR, and reads/decrypts deployment secrets without static keys |
 
 ### Terraform Controller Bootstrap
@@ -188,6 +224,8 @@ permissions were required for:
 - Creating the EC2 secrets inline policy with `iam:PutRolePolicy`
 - Reading and listing existing inline role policies
 - Managing the existing ECR resources and IAM policy attachments
+- Creating and managing the GitHub OIDC provider, publisher role, and inline
+  ECR policy
 
 These are controller permissions used by Terraform. They are distinct from the
 runtime permissions granted to the EC2 instance role and from the KMS key,
@@ -258,6 +296,11 @@ fixed monthly cost estimate.
 - Some IAM permissions remain manual.
 - Parameter values and their initial migration are not Terraform-managed.
 - Inventory and ECR registry values are environment-specific.
+- The workflow currently contains an environment-specific publisher role ARN;
+  the account identifier is not a credential, but portability requires making
+  this value configurable.
+- GitHub Actions role assumption and automatic ECR publication are configured
+  but not yet run-verified.
 - The private subnet has no NAT gateway and hosts no workload.
 - There is no managed database service.
 - There is no load balancer, Elastic IP, managed certificate service, or
