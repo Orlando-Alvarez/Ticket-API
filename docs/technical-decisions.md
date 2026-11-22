@@ -1,9 +1,93 @@
-# Infrastructure and Deployment Decisions
+# Ticket-API Engineering Decisions
 
 [Back to the main README](../README.md)
 
 This document records project-specific decisions and tradeoffs. It does not
 claim that the selected tools are universally preferable.
+
+## FastAPI for the HTTP API
+
+**Decision:** Build a versioned Python REST API with FastAPI, Pydantic models,
+and generated OpenAPI documentation.
+
+**Benefits**
+
+- Keeps request validation and response schemas close to route contracts.
+- Provides dependency injection for database sessions and authentication.
+- Generates Swagger UI and ReDoc from the implemented API.
+- Supports focused tests through dependency overrides and `TestClient`.
+
+**Tradeoffs**
+
+- Authorization remains application logic that must be reviewed and tested;
+  generated schemas do not enforce ownership rules.
+- The current codebase has route and CRUD layers but no separate service
+  layer, so new business logic must avoid bloating either boundary.
+
+This is an explanation of the implemented architecture, not a claim that
+FastAPI was historically benchmarked against every alternative.
+
+## PostgreSQL, SQLAlchemy, and Alembic
+
+**Decision:** Use PostgreSQL for relational persistence, SQLAlchemy 2 for ORM
+and transaction access, and Alembic for versioned schema changes.
+
+**Benefits**
+
+- Enforces foreign keys, uniqueness, defaults, and incident constraints in the
+  database as well as in API validation.
+- Supports transactional, conditional soft-delete updates.
+- Makes schema evolution reviewable and testable in order.
+- Keeps application models portable enough for fast SQLite-backed unit tests
+  while retaining PostgreSQL integration coverage.
+
+**Tradeoffs**
+
+- SQLite unit tests cannot prove PostgreSQL-specific behavior.
+- Migration downgrade tests are destructive and require the guarded,
+  disposable `ticket_api_test` database.
+- The current AWS database runs in Docker on one EC2 host rather than as a
+  managed, highly available service.
+
+## Docker for Runtime Consistency
+
+**Decision:** Package FastAPI and its dependencies in a non-root image and use
+layered Docker Compose files for local, production-like, and AWS execution.
+
+**Benefits**
+
+- Uses the same application image for FastAPI and Alembic migrations.
+- Makes startup ordering, health checks, networks, and volumes explicit.
+- Reduces host-level Python dependency drift.
+- Keeps environment-specific differences in reviewable overrides.
+
+**Tradeoffs**
+
+- Compose merge order is significant and must be validated.
+- The current single-host topology does not provide rolling updates or
+  automatic failover.
+- A protected host-local `.env` remains part of the runtime contract.
+
+## GitHub Actions for Continuous Integration
+
+**Decision:** Run application tests, PostgreSQL migration/integration tests,
+and Docker build validation in GitHub Actions before image publication.
+
+**Benefits**
+
+- Gives pull requests repeatable quality gates on clean runners.
+- Exercises both the fast application suite and real PostgreSQL behavior.
+- Prevents the Docker build and publication jobs from running after failed
+  tests.
+- Keeps the workflow and its permissions reviewable with the source.
+
+**Tradeoffs**
+
+- CI does not validate live AWS, Cloudflare, TLS, systemd, or Ansible runtime
+  behavior.
+- The ECR job is configured but not yet verified by a successful run on
+  `main`.
+- Deployment remains a separate operator-controlled workflow.
 
 ## Terraform for Infrastructure Provisioning
 
@@ -66,7 +150,9 @@ KMS key, ECR repository, and S3 transfer bucket with Terraform.
 ## Amazon ECR for Image Distribution
 
 **Decision:** Build the API image away from EC2 and distribute it through
-private ECR.
+private ECR. GitHub Actions is configured to publish commit-derived immutable
+tags after main-branch quality gates; a manual publisher remains the verified
+fallback.
 
 **Benefits**
 
@@ -77,27 +163,61 @@ private ECR.
 
 **Tradeoffs**
 
-- Publication remains manual.
-- An authorized publisher identity is required.
+- The configured GitHub Actions publication path has not yet been verified by
+  a successful main-branch run.
+- The publication job rebuilds the image rather than promoting the artifact
+  produced by the preceding Docker build job.
+- An authorized identity is still required for the manual fallback.
 - Scan results are not currently used as deployment gates.
 - Registry hostnames should be parameterized.
 
-## Digest-Pinned Deployment
+## GitHub OIDC Instead of Long-Lived CI Credentials
 
-**Decision:** Pass `image_digest` and deploy
-`<repository>@sha256:<digest>`.
+**Decision:** Federate GitHub Actions with AWS IAM through OpenID Connect and
+grant a dedicated role permission to publish only to the Ticket-API ECR
+repository.
 
 **Benefits**
 
-- Selects the exact image content.
-- Prevents tag movement from changing an existing release reference.
-- Makes repeat pull checks deterministic.
+- Avoids storing a long-lived AWS access key and secret access key in GitHub.
+- Produces short-lived role sessions for the publication job.
+- Restricts the trust subject to this repository's `main` branch.
+- Keeps publication permissions separate from EC2 pull access, Ansible, and
+  Terraform provisioning.
+- Limits `id-token: write` to the one job that needs federation.
 
 **Tradeoffs**
 
-- Operators must obtain and pass the digest.
-- Human-readable release metadata still depends on tags or external records.
-- Automated promotion and rollback workflows do not exist.
+- A valid workflow configuration is not operational evidence; federation must
+  still be verified on `main`.
+- The role ARN in the workflow is environment-specific.
+- OIDC provider, IAM trust, repository policy, workflow permissions, and ECR
+  configuration must remain synchronized.
+- A compromised trusted main-branch workflow could publish images, so branch
+  protection and review remain part of the security boundary.
+
+The OIDC provider, publisher role, and inline ECR policy have been applied and
+operator-verified. This confirms the AWS IAM foundation, not successful role
+assumption or publication by GitHub Actions.
+
+## Commit-Derived Tags and Digest-Pinned Runtime
+
+**Decision:** Publish `sha-<full-commit-sha>` and deploy the selected image by
+its ECR SHA-256 digest.
+
+**Benefits**
+
+- Connects the registry artifact to a source revision.
+- Works with immutable ECR tags.
+- Prevents tag movement from changing the runtime image selection.
+- Keeps deployment approval separate from image publication.
+
+**Tradeoffs**
+
+- The operator must resolve and record the digest before deployment.
+- The current workflow does not generate provenance or cryptographic
+  signatures.
+- No automated promotion, deployment approval, or rollback mechanism exists.
 
 ## Docker Compose at the Current Scale
 
