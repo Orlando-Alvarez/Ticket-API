@@ -52,7 +52,7 @@ pipeline{
 
                     echo "SHA lenght: ${selectedSha?.length()}"
 
-                    if (!(selectedSha ==~ /^[0=9-f]{40}$/)) {
+                    if (!(selectedSha ==~ /^[0-9-f]{40}$/)) {
                         error('RELEASE_SHA must contain 40 lowercase hexadecimal characters')
                     }
 
@@ -61,7 +61,7 @@ pipeline{
                             script: '''
                                 set -eu
 
-                                aws ecr describe-image \
+                                aws ecr describe-images \
                                     --repository-name "$ECR_REPOSITORY" \
                                     --image-ids "imageTag=sha-${RELEASE_SHA}" \
                                     --query 'imageDetails[0].imageDigest' \
@@ -70,7 +70,7 @@ pipeline{
                             returnStdout: true
                         ).trim()
 
-                        if(!(digest == /^sha256:[0-9a-f]{64}$/)) {
+                        if(!(digest ==~ /^sha256:[0-9a-f]{64}$/)) {
                             error('ECR returned an invalid image digest')
                         }
 
