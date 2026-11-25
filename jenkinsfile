@@ -24,7 +24,7 @@ pipeline{
                         --query Arn --output text)"
 
                         echo "$ACTUAL_ARN"
-                    
+
                     case "$ACTUAL_ARN" in
                         arn:aws:sts::891920435362:assumed-role/ticket-api-dev-jenkins-deployer/*)
                             echo "Correct Jenkins IAM role"
@@ -35,7 +35,7 @@ pipeline{
                             ;;
                         esac
                 '''
-            }   
+            }
         }
         stage('Verify ECR images'){
             steps{
