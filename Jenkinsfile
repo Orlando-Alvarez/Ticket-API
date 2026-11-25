@@ -82,6 +82,29 @@ pipeline{
                 }
             }
         }
+        stage('Verify Deployment Tooling'){
+            steps{
+                sh '''
+                    set -eu
+
+                    echo "Checking AWS CLI..."
+                    aws --version
+
+                    echo "Checking Ansible..."
+                    /opt/ansible/bin/ansible --version
+
+                    echo "Checking Session Manager Plugin..."
+                    session-manager-plugin --version
+
+                    echo "Checking AWS identity..."
+                    aws sts get-caller-identity \
+                        --query Arn \
+                        --output text
+
+                    echo "Deployment tooling verification completed"
+                '''
+            }
+        }
         stage('Approve Deployment') {
             steps {
                 script {
