@@ -108,8 +108,8 @@ pipeline{
         stage('Approve Deployment') {
             steps {
                 script {
-                    def approvedBY = timeout(time: 5, unit: 'MINUTES') {
-                        input(
+                    def approvedBy = timeout(time: 5, unit: 'MINUTES') {
+                        return input(
                             message: """Approve deployment of Ticket-API?
 
         Commit: ${params.RELEASE_SHA}
