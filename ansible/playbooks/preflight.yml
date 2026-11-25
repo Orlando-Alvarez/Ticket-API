@@ -1,0 +1,94 @@
+
+---
+- name: Verify EC2 deployment prerequisites
+  hosts: ticket_api
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Verify administrative privileges
+      ansible.builtin.command:
+        argv:
+          - id
+          - -u
+      register: user_id
+      changed_when: false
+
+    - name: Assert root privileges
+      ansible.builtin.assert:
+        that:
+          - user_id.stdout == "0"
+        fail_msg: "Ansible does not have root privileges"
+
+    - name: Verify Docker daemon
+      ansible.builtin.command:
+        argv:
+          - docker
+          - info
+      changed_when: false
+
+    - name: Verify Docker Compose
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - version
+      changed_when: false
+
+    - name: Verify current API readiness
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:8080/api/v1/health/ready"
+        method: GET
+        status_code: 200
+        timeout: 5
+      changed_when: false
+
+    - name: Inspect running Ticket-API containers
+      ansible.builtin.command:
+        argv:
+          - docker
+          - ps
+          - --no-trunc
+          - --filter
+          - label=com.docker.compose.project=ticket-api
+      register: running_containers
+      changed_when: false
+
+    - name: Display current container images
+      ansible.builtin.debug:
+        var: running_containers.stdout_lines
+
+    - name: Inspect current API container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - container
+          - inspect
+          - ticket-api
+      register: current_api_container
+      changed_when: false
+      no_log: true
+
+    - name: Extract deployed image reference
+      ansible.builtin.set_fact:
+        deployed_image_ref: "{{ (current_api_container.stdout | from_json | first).Config.Image }}"
+      no_log: true
+
+    - name: Validate deployed image reference
+      ansible.builtin.assert:
+        that:
+          - deployed_image_ref is match('^.+/ticket-api@sha256:[0-9a-f]{64}$')
+        fail_msg: "Running API image does not use an expected immutable ECR digest"
+
+    - name: Display deployed image reference
+      ansible.builtin.debug:
+        msg: "Current API image: {{ deployed_image_ref }}"
+
+    - name: Save previous image reference on Jenkins agent
+      ansible.builtin.copy:
+        content: "{{ deployed_image_ref }}\n"
+        dest: "{{ lookup('ansible.builtin.env', 'WORKSPACE') }}/previous-image.txt"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: lookup('ansible.builtin.env', 'WORKSPACE') | length > 0

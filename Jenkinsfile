@@ -82,17 +82,83 @@ pipeline{
                 }
             }
         }
+        stage('Verify Deployment Tooling'){
+            steps{
+                sh '''
+                    set -eu
+
+                    echo "Checking AWS CLI..."
+                    aws --version
+
+                    echo "Checking Ansible..."
+                    /opt/ansible/bin/ansible --version
+
+                    echo "Checking Session Manager Plugin..."
+                    session-manager-plugin --version
+
+                    echo "Checking AWS identity..."
+                    aws sts get-caller-identity \
+                        --query Arn \
+                        --output text
+
+                    echo "Deployment tooling verification completed"
+                '''
+            }
+        }
+        stage('Verify Ansible Inventory') {
+            steps {
+                sh '''
+                    set -eu
+        
+                    echo "Checking Ansible inventory..."
+        
+                    /opt/ansible/bin/ansible-inventory \
+                        -i ansible/Inventory/hosts.yml \
+                        --host ticket-api-ec2
+        
+                    echo "Checking resolved AWS profile..."
+        
+                    /opt/ansible/bin/ansible \
+                        -i ansible/Inventory/hosts.yml \
+                        ticket-api-ec2 \
+                        -c local \
+                        -m ansible.builtin.debug \
+                        -a 'var=ansible_aws_ssm_profile'
+        
+                    echo "Inventory validation completed"
+                '''
+            }
+        }
+        stage('Validate Deployment Playbook') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Validating deployment playbook..."
+
+                    test -n "$RELEASE_DIGEST"
+
+                    /opt/ansible/bin/ansible-playbook \
+                        -i ansible/Inventory/hosts.yml \
+                        ansible/playbooks/deploy_app.yml \
+                        --syntax-check \
+                        -e "image_digest=$RELEASE_DIGEST"
+
+                    echo "Deployment playbook validation successful"
+                '''
+            }
+        }
         stage('Approve Deployment') {
             steps {
                 script {
-                    timeout(time: 5, unit: 'MINUTES') {
-                        input(
+                    def approvedBy = timeout(time: 5, unit: 'MINUTES') {
+                        return input(
                             message: """Approve deployment of Ticket-API?
 
         Commit: ${params.RELEASE_SHA}
         Image digest: ${env.RELEASE_DIGEST}
 
-        This is a test. No EC2 deployment will occur.""",
+        DRY RUN: No EC2 deployment will occur.""",
                             ok: 'Approve',
                             submitter: 'Admin',
                             submitterParameter: 'APPROVED_BY'
@@ -105,5 +171,81 @@ pipeline{
                 }
             }
         }
+        stage('Verify SSM Connectivity') {
+            steps {
+                timeout(time: 3, unit: 'MINUTES') {
+                    sh '''
+                        set -eu
+
+                        echo "Testing Jenkins to EC2 connectivity..."
+
+                        /opt/ansible/bin/ansible \
+                            -i ansible/Inventory/hosts.yml \
+                            ticket-api-ec2 \
+                            -m ansible.builtin.command \
+                            -a 'hostname'
+
+                        echo "SSM connectivity verified successfully"
+                    '''
+                }
+            }
+        }
+        stage('Verify EC2 Deployment Prerequisites') {
+            steps {
+                timeout(time: 3, unit: 'MINUTES') {
+                    sh '''
+                        set -eu
+
+                        echo "Checking EC2 deployment prerequisites..."
+
+                        /opt/ansible/bin/ansible-playbook \
+                            -i ansible/Inventory/hosts.yml \
+                            ansible/playbooks/preflight.yml
+
+                        echo "EC2 deployment prerequisites verified"
+                    '''
+                }
+                archiveArtifacts(
+                    artifacts: 'previous-image.txt',
+                    fingerprint: true
+                )
+            }
+        }
+        stage('Verify Rollback Image') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Checking previous image availability..."
+
+                    test -s previous-image.txt
+
+                    PREVIOUS_IMAGE="$(cat previous-image.txt)"
+                    PREVIOUS_DIGEST="${PREVIOUS_IMAGE##*@}"
+
+                    if ! printf '%s\\n' "$PREVIOUS_DIGEST" |
+                        grep -Eq '^sha256:[0-9a-f]{64}$'; then
+                        echo "Invalid previous image digest" >&2
+                        exit 1
+                    fi
+
+                    EXPECTED_REGISTRY="891920435362.dkr.ecr.us-west-2.amazonaws.com/ticket-api"
+
+                    if [ "$PREVIOUS_IMAGE" != "$EXPECTED_REGISTRY@$PREVIOUS_DIGEST" ]; then
+                        echo "Unexpected previous image repository" >&2
+                        exit 1
+                    fi
+
+                    aws ecr describe-images \
+                        --repository-name "$ECR_REPOSITORY" \
+                        --image-ids "imageDigest=$PREVIOUS_DIGEST" \
+                        --query 'imageDetails[0].imageDigest' \
+                        --output text
+
+                    echo "Previous release is available in ECR"
+                '''
+            }
+        }
+
     }
 }
