@@ -50,11 +50,11 @@ pipeline{
                 script{
                     def selectedSha = params.RELEASE_SHA?.trim()
 
-                    if (!(selectedSHA ==~ /^[0=9-f]{40}$/)) {
+                    if (!(selectedSha ==~ /^[0=9-f]{40}$/)) {
                         error('RELEASE_SHA must contain 4- lowercase hexadecimal characters')
                     }
 
-                    withEnv(["RELEASE_SHA=${selectesSha}"]) {
+                    withEnv(["RELEASE_SHA=${selectedSha}"]) {
                         def digest = sh(
                             script: '''
                                 set -eu
