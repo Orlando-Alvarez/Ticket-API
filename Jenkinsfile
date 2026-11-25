@@ -105,6 +105,21 @@ pipeline{
                 '''
             }
         }
+        stage('Verify Ansible Inventory'){
+            steps{
+                sh '''
+                    set -eu
+
+                    echo "Checking Ansible inventory..."
+
+                    /opt/ansible/bin/ansible-inventory \
+                        -i ansible/Inventory/hosts.yml \
+                        --host ticket-api-ec2
+
+                    echo "Inventory validation completed"
+                '''
+            }
+        }
         stage('Approve Deployment') {
             steps {
                 script {
