@@ -105,26 +105,26 @@ pipeline{
                 '''
             }
         }
-        stage('Verify Ansible Inventory'){
-            steps{
+        stage('Verify Ansible Inventory') {
+            steps {
                 sh '''
                     set -eu
-
+        
                     echo "Checking Ansible inventory..."
-
+        
                     /opt/ansible/bin/ansible-inventory \
                         -i ansible/Inventory/hosts.yml \
                         --host ticket-api-ec2
-
+        
                     echo "Checking resolved AWS profile..."
-
-                    /opt/ansible/bin/ansible-inventory \
+        
+                    /opt/ansible/bin/ansible \
                         -i ansible/Inventory/hosts.yml \
                         ticket-api-ec2 \
                         -c local \
                         -m ansible.builtin.debug \
                         -a 'var=ansible_aws_ssm_profile'
-
+        
                     echo "Inventory validation completed"
                 '''
             }
