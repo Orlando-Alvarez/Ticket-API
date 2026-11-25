@@ -1,0 +1,44 @@
+
+---
+- name: Verify EC2 deployment prerequisites
+  hosts: ticket_api
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Verify administrative privileges
+      ansible.builtin.command:
+        argv:
+          - id
+          - -u
+      register: user_id
+      changed_when: false
+
+    - name: Assert root privileges
+      ansible.builtin.assert:
+        that:
+          - user_id.stdout == "0"
+        fail_msg: "Ansible does not have root privileges"
+
+    - name: Verify Docker daemon
+      ansible.builtin.command:
+        argv:
+          - docker
+          - info
+      changed_when: false
+
+    - name: Verify Docker Compose
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - version
+      changed_when: false
+
+    - name: Verify current API readiness
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:8080/api/v1/health/ready"
+        method: GET
+        status_code: 200
+        timeout: 5
+      changed_when: false

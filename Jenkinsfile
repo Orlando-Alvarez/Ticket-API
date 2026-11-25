@@ -129,6 +129,25 @@ pipeline{
                 '''
             }
         }
+        stage('Validate Deployment Playbook') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Validating deployment playbook..."
+
+                    test -n "$RELEASE_DIGEST"
+
+                    /opt/ansible/bin/ansible-playbook \
+                        -i ansible/Inventory/hosts.yml \
+                        ansible/playbooks/deploy_app.yml \
+                        --syntax-check \
+                        -e "image_digest=$RELEASE_DIGEST"
+
+                    echo "Deployment playbook validation successful"
+                '''
+            }
+        }
         stage('Approve Deployment') {
             steps {
                 script {
@@ -171,24 +190,23 @@ pipeline{
                 }
             }
         }
-        stage('Validate Deployment Playbook') {
+        stage('Verify EC2 Deployment Prerequisites') {
             steps {
-                sh '''
-                    set -eu
+                timeout(time: 3, unit: 'MINUTES') {
+                    sh '''
+                        set -eu
 
-                    echo "Validating deployment playbook..."
+                        echo "Checking EC2 deployment prerequisites..."
 
-                    test -n "$RELEASE_DIGEST"
+                        /opt/ansible/bin/ansible-playbook \
+                            -i ansible/Inventory/hosts.yml \
+                            ansible/playbooks/preflight.yml
 
-                    /opt/ansible/bin/ansible-playbook \
-                        -i ansible/Inventory/hosts.yml \
-                        ansible/playbooks/deploy_app.yml \
-                        --syntax-check \
-                        -e "image_digest=$RELEASE_DIGEST"
-
-                    echo "Deployment playbook validation successful"
-                '''
+                        echo "EC2 deployment prerequisites verified"
+                    '''
+                }
             }
         }
+
     }
 }
