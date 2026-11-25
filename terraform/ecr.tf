@@ -25,12 +25,13 @@ resource "aws_ecr_lifecycle_policy" "ticket_api" {
     rules = [
       {
         rulePriority = 1
-        description  = "Keep the 10 most recent images"
+        description  = "Expire untagged images older than 90 days"
 
         selection = {
-          tagStatus   = "any"
-          countType   = "imageCountMoreThan"
-          countNumber = 10
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 90
         }
 
         action = {
