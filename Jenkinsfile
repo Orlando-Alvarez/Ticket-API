@@ -152,5 +152,24 @@ pipeline{
                 }
             }
         }
+        stage('Verify SSM Connectivity') {
+            steps {
+                timeout(time: 3, unit: 'MINUTES') {
+                    sh '''
+                        set -eu
+        
+                        echo "Testing Jenkins to EC2 connectivity..."
+        
+                        /opt/ansible/bin/ansible \
+                            -i ansible/Inventory/hosts.yml \
+                            ticket-api-ec2 \
+                            -m ansible.builtin.command \
+                            -a 'hostname'
+        
+                        echo "SSM connectivity verified successfully"
+                    '''
+                }
+            }
+        }
     }
 }
