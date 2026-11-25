@@ -205,8 +205,11 @@ pipeline{
                         echo "EC2 deployment prerequisites verified"
                     '''
                 }
+                archiveArtifacts(
+                    artifacts: 'previous-image.txt',
+                    fingerprint: true
+                )
             }
         }
-
     }
 }

@@ -83,3 +83,12 @@
     - name: Display deployed image reference
       ansible.builtin.debug:
         msg: "Current API image: {{ deployed_image_ref }}"
+
+    - name: Save previous image reference on Jenkins agent
+      ansible.builtin.copy:
+        content: "{{ deployed_image_ref }}\n"
+        dest: "{{ lookup('ansible.builtin.env', 'WORKSPACE') }}/previous-image.txt"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: lookup('ansible.builtin.env', 'WORKSPACE') | length > 0
