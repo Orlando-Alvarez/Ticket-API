@@ -1,0 +1,58 @@
+pipeline{
+    agent{
+        label 'ticket-api-cd'
+    }
+
+    options{
+        disableConcurrentBuilds()
+        timeout(time:10, unit: 'MINUTES')
+    }
+
+    environment{
+        AWS_PROFILE = 'ticketapi-jenkins'
+        AWS_DEFAULT_REGION = 'us-west-2'
+        ECR_REPOSITORY = 'ticket-api'
+    }
+
+    stages{
+        stage('Verify AWS Identity'){
+            steps{
+                sh '''
+                    set -eu
+
+                    ACTUAL_ARN="$(aws sts get-caller-identity \
+                        --query Arn --output text)"
+
+                        echo "$ACTUAL_ARN"
+                    
+                    case "$ACTUAL_ARN" in
+                        arn:aws:sts::891920435362:assumed-role/ticket-api-dev-jenkins-deployer/*)
+                            echo "Correct Jenkins IAM role"
+                            ;;
+                        *)
+                            echo "Unexpected AWS identity" >&2
+                            exit 1
+                            ;;
+                        esac
+                '''
+            }   
+        }
+        stage('Verify ECR images'){
+            steps{
+                sh '''
+                    set -eu
+
+                    DIGEST="$(aws ecr describe-images \
+                        --repository-name "$ECR_REPOSITORY" \
+                        --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' \
+                        --output text)"
+
+                    test -n "$DIGEST"
+                    test "$DIGEST" != "None"
+
+                    echo "Image digest: $DIGEST"
+                '''
+            }
+        }
+    }
+}
