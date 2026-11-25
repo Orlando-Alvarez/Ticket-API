@@ -3,8 +3,8 @@
 [Back to the main README](../README.md)
 
 Ticket-API separates fast application tests, PostgreSQL integration tests,
-Continuous Integration, configured image publication, and manual
-infrastructure/deployment validation.
+GitHub Actions CI and image publication, local Jenkins validation, and manual
+infrastructure and deployment checks.
 
 ## Static Analysis
 
@@ -115,22 +115,49 @@ on pushes to `main` and `feat/**`, and pull requests targeting `main`.
 ### ECR Publication Job
 
 - Depends on the Docker build job
-- Runs only for a direct push to `main`
+- Runs only for `push` events on `main`, including merge commits
 - Requests `id-token: write` at the job level
 - Assumes a Terraform-managed AWS role through GitHub OIDC
 - Authenticates to the private ECR registry
 - Rebuilds and pushes `sha-<full-commit-sha>`
 
-The applied and operator-verified OIDC trust policy limits role assumption to
-this repository's `main` branch. The role can push to the Ticket-API
-repository, while the EC2 runtime role remains pull-only. Actual GitHub role
-assumption and automatic publication have not yet been verified by a
-successful main-branch run.
+The OIDC trust policy limits role assumption to this repository's `main`
+branch. The role can push to the Ticket-API repository. The EC2 runtime role
+has pull-only ECR access. The [successful `main` run](https://github.com/Orlando-Alvarez/Ticket-API/actions/runs/44975797065)
+completed all four jobs, including the OIDC, ECR login, and image push steps.
 
 The workflow does not run Terraform or Ansible and does not deploy to EC2. It
 provides Continuous Integration and a gated image-publication step, not
 Continuous Deployment. See [CI/CD and Image Delivery](ci-cd.md) for the full
 boundary.
+
+## Jenkins Pipeline Validation
+
+Use the controller's Declarative Pipeline linter to check the repository-root
+[`jenkinsfile`](../jenkinsfile). From Bash, set `JENKINS_USER` to your local
+Jenkins user and enter your Jenkins API token at the password prompt.
+
+```bash
+curl --fail-with-body --user "$JENKINS_USER" \
+  --form 'jenkinsfile=<jenkinsfile' \
+  http://localhost:18081/pipeline-model-converter/validate
+```
+
+Check for `Jenkinsfile successfully validated.` in the response. The linter
+checks declarative syntax. AWS behavior is tested at runtime.
+[Jenkins Declarative Pipeline linter](https://www.jenkins.io/doc/book/pipeline/development/#command-line-pipeline-linter)
+
+To test before commit, use a local **Pipeline script** job, paste the script,
+and run it on the online node labeled `ticket-api-cd`. The pipeline reads the
+case-sensitive STS response field with `--query Arn`. See
+[pipeline behavior and evidence](ci-cd.md#pipeline-behavior-and-evidence).
+
+The operator reported a successful toolchain validation and a local AWS
+validation ending with `Finished: SUCCESS`. In the tested script, that result
+means STS returned the expected assumed-role identity and ECR returned a
+non-empty digest. The local test covers that lab session only. Ansible,
+SSM connectivity from Jenkins, EC2 changes, and rollback are outside the
+job's current stages.
 
 ## Configuration Validation
 
@@ -230,10 +257,8 @@ The second full deployment reported `changed=1` because the one-shot Alembic
 migration container ran again. It is inaccurate to describe the complete
 deployment as unchanged.
 
-These validations are not CI jobs and should not be represented as automated
-release evidence. In particular, the previously verified manual ECR
-publication does not prove that GitHub OIDC federation has executed
-successfully.
+These are operator-run checks. The GitHub Actions run above provides separate
+evidence of automated ECR publication.
 
 No automated test currently exercises live KMS, Parameter Store, IAM,
 Cloudflare, ACME, systemd, or certificate renewal. DDNS unit tests mock external
@@ -248,8 +273,7 @@ portfolio evidence would include:
 
 1. Swagger UI showing the real endpoint groups.
 2. A redacted authenticated API response.
-3. GitHub Actions showing the three validation/build jobs passing and, after
-   verification on `main`, the conditional ECR publication job.
+3. The successful GitHub Actions run on `main`, including the ECR job.
 4. Ansible recap for the first and repeat deployment.
 5. Public Swagger and readiness responses with certificate details redacted.
 6. ECR repository settings showing immutable tags and scan on push, with

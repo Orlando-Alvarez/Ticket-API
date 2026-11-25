@@ -161,6 +161,7 @@ The tokens should be scoped to the required Cloudflare zone and DNS actions.
 | `ticketapi-tf` | Assumes the Terraform deployer role |
 | `ticketapi-dev` | Starts SSM sessions and accesses the Ansible transfer bucket |
 | GitHub ECR publisher role | Accepts short-lived OIDC sessions only from this repository's `main` branch and pushes to its ECR repository |
+| Jenkins development role | Uses an STS role session for repository-scoped ECR metadata reads |
 | Authorized publisher profile | Supports the verified manual ECR publication fallback |
 | EC2 instance role | Registers with SSM, pulls from ECR, and decrypts the four deployment secrets |
 
@@ -190,6 +191,36 @@ current root module. These provisioning permissions are distinct from EC2
 runtime access and are not fully represented as code. See
 [AWS Infrastructure](aws-infrastructure.md#terraform-controller-bootstrap) for
 the reproducibility limitation and hardening direction.
+
+### Jenkins Lab Identity
+
+The `ticketapi-jenkins` profile uses temporary credentials from an interactive
+development IAM user session as its source identity. The trust policy in
+[`iam_jenkins.tf`](../terraform/iam_jenkins.tf) allows that specific IAM user
+to use `sts:AssumeRole` for `ticket-api-dev-jenkins-deployer`. The resulting
+role session is a separate identity. The role's inline policy grants
+`ecr:DescribeImages` and `ecr:ListImages` on the Ticket-API repository.
+
+`TicketAPI-Jenkins-PermissionsBoundary` is an existing managed policy
+referenced by Terraform. It limits the permissions the role's identity
+policies can grant. The boundary itself grants no access. Role assumption
+still depends on trust and applicable authorization, and effective access
+also depends on other relevant policies and explicit denies.
+[AWS IAM permissions boundary evaluation](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries.html)
+
+The interactive session can expire and interrupt a build. Processes in the
+agent may still be able to read the source credentials available in the
+container. The assumed role's boundary applies to that role, so source
+credentials retain their own permissions. Keep this agent restricted to
+trusted jobs and exclude untrusted public pull request code. Keep AWS access
+keys, tokens, and AWS configuration with credentials out of Dockerfiles,
+`jenkinsfile`, images, and Git.
+
+Before enabling unattended deployment, use a dedicated renewable workload
+identity with short-lived sessions, isolate the agent from untrusted jobs,
+and scope access to the required ECR metadata, SSM target, and S3 transfer
+resources. Review the role's trust and permissions boundary along with its
+identity policies. EC2 retains its separate pull and secret-read permissions.
 
 ## Systems Manager Instead of SSH
 
@@ -225,11 +256,11 @@ grants the registry authentication action and limits image upload operations
 to the Ticket-API repository. This identity is separate from the pull-only EC2
 role and the Terraform provisioning role.
 
-The OIDC provider, dedicated role, and inline ECR policy have been applied
-through Terraform and operator-verified. GitHub role assumption and automatic
-publication have not yet been verified by a successful main-branch run. Until
-that evidence exists, the pipeline path must not be described as operationally
-verified.
+The OIDC provider, publisher role, and inline ECR policy were applied through
+Terraform. The [successful `main` run](https://github.com/Orlando-Alvarez/Ticket-API/actions/runs/44975797065)
+confirmed OIDC authentication and ECR publication. The Jenkins boundary
+reference belongs to the Jenkins role. The GitHub publisher's Terraform
+declaration has no permissions boundary.
 
 Image signing, provenance attestations, vulnerability gates, and automated
 promotion are not implemented.
@@ -285,9 +316,9 @@ Operator-run checks have confirmed:
 - Successful simulated certificate renewal and deploy-hook reload
 - Enabled DDNS and certificate-renewal systemd timers
 
-These are manual deployment checks, not proof of successful GitHub OIDC
-federation, penetration-test results, compliance certifications, or automated
-secret-rotation evidence.
+These results cover operator-run deployment checks. GitHub OIDC and ECR
+publication have separate workflow evidence, and Jenkins has a separate
+operator-reported local validation. See [CI/CD and Image Delivery](ci-cd.md).
 
 ## Infrastructure Data
 
@@ -313,6 +344,6 @@ secret-rotation evidence.
    recovery.
 8. Add centralized logs, metrics, dashboards, and alerts.
 9. Add automated dependency, container, deployment, and security checks.
-10. Verify OIDC publication, then add image signing, provenance, and promotion
-    controls.
+10. Add image signing, provenance, and promotion controls.
+11. Replace Jenkins lab authentication with a scoped, renewable workload identity.
 

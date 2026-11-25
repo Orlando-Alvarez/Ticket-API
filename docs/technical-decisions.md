@@ -68,10 +68,11 @@ layered Docker Compose files for local, production-like, and AWS execution.
   automatic failover.
 - A protected host-local `.env` remains part of the runtime contract.
 
-## GitHub Actions for Continuous Integration
+## GitHub Actions for CI, Jenkins for CD
 
-**Decision:** Run application tests, PostgreSQL migration/integration tests,
-and Docker build validation in GitHub Actions before image publication.
+**Decision:** Run application tests, PostgreSQL migration and integration
+tests, Docker build validation, and ECR publication in GitHub Actions.
+Develop the deployment workflow separately in Jenkins.
 
 **Benefits**
 
@@ -80,14 +81,26 @@ and Docker build validation in GitHub Actions before image publication.
 - Prevents the Docker build and publication jobs from running after failed
   tests.
 - Keeps the workflow and its permissions reviewable with the source.
+- Keeps the GitHub publisher focused on ECR and lets deployment use a
+  separately scoped identity.
+- Lets the Docker agent carry the Ansible, Python, AWS CLI, and Session
+  Manager tooling required for future deployment stages.
 
 **Tradeoffs**
 
-- CI does not validate live AWS, Cloudflare, TLS, systemd, or Ansible runtime
-  behavior.
-- The ECR job is configured but not yet verified by a successful run on
-  `main`.
-- Deployment remains a separate operator-controlled workflow.
+- GitHub Actions verifies the publication path. EC2 configuration, Cloudflare,
+  TLS, systemd, and Ansible runtime behavior require separate checks.
+- Jenkins adds controller and agent maintenance, plugin upgrades, persistent
+  storage, and responsibility for AWS identity renewal and job isolation.
+- A GitHub Actions-only pipeline would reduce the number of systems to operate.
+  The split lets this project develop a dedicated deployment runner while
+  keeping the existing CI workflow and publisher permissions focused.
+- Interactive lab credentials can expire and expose source credentials to
+  agent jobs. Deployment remains operator-triggered until identity, SSM and
+  S3 permissions, commit selection, readiness, and recovery are validated.
+
+See [CI/CD and Image Delivery](ci-cd.md) for the successful GitHub publication
+run and the scope of the operator-reported Jenkins validation.
 
 ## Terraform for Infrastructure Provisioning
 
@@ -150,9 +163,9 @@ KMS key, ECR repository, and S3 transfer bucket with Terraform.
 ## Amazon ECR for Image Distribution
 
 **Decision:** Build the API image away from EC2 and distribute it through
-private ECR. GitHub Actions is configured to publish commit-derived immutable
-tags after main-branch quality gates; a manual publisher remains the verified
-fallback.
+private ECR. GitHub Actions publishes commit-derived immutable tags after
+main-branch quality gates. An authorized manual publisher remains available
+as a fallback.
 
 **Benefits**
 
@@ -163,8 +176,6 @@ fallback.
 
 **Tradeoffs**
 
-- The configured GitHub Actions publication path has not yet been verified by
-  a successful main-branch run.
 - The publication job rebuilds the image rather than promoting the artifact
   produced by the preceding Docker build job.
 - An authorized identity is still required for the manual fallback.
@@ -188,17 +199,15 @@ repository.
 
 **Tradeoffs**
 
-- A valid workflow configuration is not operational evidence; federation must
-  still be verified on `main`.
 - The role ARN in the workflow is environment-specific.
 - OIDC provider, IAM trust, repository policy, workflow permissions, and ECR
   configuration must remain synchronized.
 - A compromised trusted main-branch workflow could publish images, so branch
   protection and review remain part of the security boundary.
 
-The OIDC provider, publisher role, and inline ECR policy have been applied and
-operator-verified. This confirms the AWS IAM foundation, not successful role
-assumption or publication by GitHub Actions.
+The [successful `main` run](https://github.com/Orlando-Alvarez/Ticket-API/actions/runs/44975797065)
+confirmed OIDC role assumption and publication. Jenkins uses a different
+trust relationship and role for its local ECR metadata checks.
 
 ## Commit-Derived Tags and Digest-Pinned Runtime
 

@@ -23,8 +23,8 @@ The table describes the resources represented by the current Terraform root
 module. The baseline network, compute, runtime IAM, KMS, Parameter Store, ECR,
 and S3 design has operator-reported deployment evidence. The GitHub OIDC
 provider, dedicated publisher role, and inline ECR policy have also been
-applied through Terraform and operator-verified. Actual role assumption and
-automatic publication from GitHub Actions remain unverified.
+applied through Terraform and operator-verified. The GitHub Actions workflow
+has successfully assumed the role and published an image on `main`.
 
 | Resource | Implemented configuration |
 | --- | --- |
@@ -45,6 +45,7 @@ automatic publication from GitHub Actions remain unverified.
 | ECR lifecycle | Retains the 10 most recent images |
 | GitHub OIDC provider | Trusts tokens issued by GitHub Actions for the AWS STS audience |
 | GitHub ECR publisher role | Trusts only this repository's `main` branch and can push only to the Ticket-API ECR repository |
+| Jenkins development role and inline policy | Trusts one development IAM user and grants repository-scoped ECR metadata reads. References an existing managed permissions boundary. |
 | Amazon S3 | Private Ansible transfer bucket, AES-256 encryption, one-day expiration |
 
 The private subnet currently hosts no project workload. The S3 bucket exists
@@ -143,11 +144,25 @@ On a push to `main`, and only after the test, PostgreSQL integration, and Docker
 build jobs succeed, it is configured to build and push an immutable
 `sha-<full-commit-sha>` tag.
 
-The OIDC provider, publisher role, and inline policy have been applied and
-operator-verified in AWS. A successful main-branch workflow execution has not
-yet verified that GitHub can assume the role and publish an image. This
-distinction separates infrastructure evidence from pipeline evidence. See
-[CI/CD and Image Delivery](ci-cd.md) for the end-to-end job flow.
+The [successful `main` run](https://github.com/Orlando-Alvarez/Ticket-API/actions/runs/44975797065)
+shows successful OIDC authentication, ECR login, and image push. See
+[CI/CD and Image Delivery](ci-cd.md) for the job dependencies and artifact
+handoff.
+
+## Jenkins Development Role
+
+[`iam_jenkins.tf`](../terraform/iam_jenkins.tf) declares
+`aws_iam_role.jenkins_deployer` (`ticket-api-dev-jenkins-deployer` with the
+default variables) and `aws_iam_role_policy.jenkins_ecr_read`. The trust policy
+allows `sts:AssumeRole` from a single development IAM user. The inline policy
+grants `ecr:DescribeImages` and `ecr:ListImages` on the Ticket-API ECR repository.
+
+Terraform attaches `TicketAPI-Jenkins-PermissionsBoundary` to the role by
+referencing the ARN of a customer-managed policy created separately in AWS.
+The boundary policy's document and lifecycle are outside this root module.
+The Jenkins role's declared permissions cover ECR metadata reads. SSM
+sessions, S3 transfers, image pulls, and EC2 deployment require other
+identities or permissions.
 
 ## Terraform Workflow on Windows PowerShell
 
@@ -208,6 +223,7 @@ change.
 | `ticketapi-tf` | Assumes `TicketAPI-Terraform-Deployer` to provision represented resources |
 | `ticketapi-dev` | Runs Ansible through SSM and accesses the dedicated transfer bucket |
 | GitHub ECR publisher role | Accepts short-lived OIDC sessions from this repository's `main` branch and pushes only to its ECR repository |
+| Jenkins development role | Assumed through the local `ticketapi-jenkins` profile for repository-scoped ECR metadata reads |
 | Authorized publisher profile | Supports the documented manual publication fallback |
 | EC2 instance role | Registers with SSM, pulls from ECR, and reads/decrypts deployment secrets without static keys |
 
@@ -237,6 +253,12 @@ That is a reproducibility limitation: a new controller cannot be recreated
 solely from the current Terraform root module. Move this prerequisite into a
 separate, controlled IAM-bootstrap process with reviewed least-privilege
 policies. Do not compensate by granting broad administrator access.
+
+The operator reported a separately configured, limited administrative IAM
+policy for the Terraform role to create and manage the Jenkins role. That
+administrative policy and the Jenkins boundary's rules are AWS-side bootstrap
+dependencies. Provisioning authority belongs to the Terraform identity.
+Jenkins uses the runtime role with the narrower ECR read policy.
 
 The custom EC2 inline policy allows `ssm:GetParameter` and
 `ssm:GetParameters` for only the four calculated parameter ARNs. It allows
@@ -299,8 +321,9 @@ fixed monthly cost estimate.
 - The workflow currently contains an environment-specific publisher role ARN;
   the account identifier is not a credential, but portability requires making
   this value configurable.
-- GitHub Actions role assumption and automatic ECR publication are configured
-  but not yet run-verified.
+- The Jenkins role references an account-specific boundary, and its trust
+  policy names an account-specific development IAM user. Bootstrapping the
+  role in a new account requires corresponding IAM prerequisites.
 - The private subnet has no NAT gateway and hosts no workload.
 - There is no managed database service.
 - There is no load balancer, Elastic IP, managed certificate service, or
