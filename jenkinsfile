@@ -94,10 +94,12 @@ pipeline{
 
         This is a test. No EC2 deployment will occur.""",
                             ok: 'Approve'
+                            submitter: 'Admin'
+                            submitterParameter: 'APPROVED_BY'
                         )
                     }
 
-                    echo 'Deployment approved'
+                    echo 'Deployment approved by: ${approvedBy}'
                     echo "Release digest: ${env.RELEASE_DIGEST}"
                     echo 'DRY RUN: No changes were made to EC2'
                 }
