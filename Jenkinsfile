@@ -75,11 +75,37 @@ pipeline{
                         }
 
                         env.RELEASE_DIGEST = digest
+                        env.VERIFIED_RELEASE_SHA = selectedSha
 
                         echo "Selected tag: sha-${selectedSha}"
                         echo "Validated image digest: ${digest}"
                     }
                 }
+            }
+        }
+
+        stage('Verify Release Commit') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Verifying release commit against main..."
+
+                    git fetch --no-tags origin \
+                        '+refs/heads/main:refs/remotes/origin/main'
+
+                    git cat-file -e "${VERIFIED_RELEASE_SHA}^{commit}"
+
+                    if ! git merge-base --is-ancestor \
+                        "$VERIFIED_RELEASE_SHA" \
+                        "refs/remotes/origin/main"; then
+
+                        echo "ERROR: Release commit is not in main" >&2
+                        exit 1
+                    fi
+
+                    echo "Release commit verified in main"
+                '''
             }
         }
         stage('Verify Deployment Tooling'){
