@@ -7,16 +7,18 @@ architecture. Planned components are identified explicitly.
 
 ## System Boundaries
 
-Ticket-API currently has three distinct operating contexts:
+Ticket-API currently has four operating contexts:
 
 1. **Direct development:** Uvicorn and Alembic run on the host against
    PostgreSQL.
 2. **Local containers:** Docker Compose builds the API image and runs
    PostgreSQL, migrations, FastAPI, and Nginx.
-3. **AWS deployment:** Terraform provisions infrastructure, GitHub Actions is
-   configured to publish a commit-tagged image to private ECR after the
-   main-branch quality gates, and Ansible deploys a selected image digest to
-   EC2 through AWS Systems Manager.
+3. **AWS delivery and deployment:** Terraform provisions infrastructure.
+   GitHub Actions publishes commit-tagged images to private ECR after the
+   quality gates on `main`. An operator runs Ansible from Ubuntu WSL to deploy
+   a selected digest to EC2 over Systems Manager.
+4. **Local Jenkins validation:** A Docker controller and inbound agent
+   exercise AWS identity and ECR metadata access ahead of deployment automation.
 
 The AWS deployment is publicly reachable at
 `https://api.orlandoalvarez.dev`. Nginx publishes HTTPS on TCP 443 while its
@@ -222,6 +224,10 @@ flowchart TB
     Actions[GitHub Actions<br/>push to main] -->|OIDC token| OIDC[IAM OIDC provider]
     OIDC --> Publisher[GitHub ECR<br/>publisher role]
     Publisher -->|repository-scoped push| ECR
+    Controller[Local Jenkins controller] -->|"WebSocket"| Agent[Jenkins Docker agent]
+    Agent -->|"Assume role and check identity"| STS[AWS STS]
+    STS --> JenkinsRole[Jenkins development role]
+    JenkinsRole -->|"ECR metadata read"| ECR
     AWS --> Parameters[Parameter Store<br/>SecureString]
     AWS --> KMS[Customer-managed KMS key]
     Parameters -->|encrypted with| KMS
@@ -229,8 +235,11 @@ flowchart TB
     Profile --> SSM[AWS Systems Manager]
     Profile -->|pull only| ECR
     Profile -->|scoped read and decrypt| Parameters
-    Ansible[Ansible in Ubuntu WSL<br/>ticketapi-dev] --> SSM
-    Ansible -. temporary modules .-> S3[Private encrypted S3 bucket]
+    ManualAnsible["Manual Ansible in Ubuntu WSL<br/>ticketapi-dev"] --> SSM
+    Agent -.->|"Planned deployment stage"| JenkinsAnsible["Ansible inside ticket-api-cd-agent"]
+    JenkinsAnsible -.->|"Planned SSM connection"| SSM
+    SSM -->|"Managed session"| EC2
+    ManualAnsible -. temporary modules .-> S3[Private encrypted S3 bucket]
     EC2 --> DDNS[DDNS systemd service]
     IMDS[IMDSv2] -->|public IPv4| DDNS
     DDNS -->|update A record| Cloudflare
@@ -249,8 +258,14 @@ flowchart LR
     Change[Push to main] --> CI[GitHub Actions quality gates]
     CI --> OIDC[OIDC role assumption]
     OIDC -->|build and push<br/>sha-commit tag| ECR[Private ECR<br/>immutable tag]
-    ECR -->|sha256 digest| Image[Local image on EC2]
-    Ansible[Ansible controller] -->|SSM| Deploy[Deployment automation on EC2]
+    Jenkins[Jenkins Docker agent] -->|"Read image metadata"| ECR
+    ECR -->|"Operator selects digest"| Operator[Operator]
+    Operator --> ManualAnsible["Manual Ansible in Ubuntu WSL"]
+    Jenkins -.->|"Planned deployment stage"| JenkinsAnsible["Ansible inside ticket-api-cd-agent"]
+    ECR -->|"EC2 pulls selected digest"| Image[Local image on EC2]
+    ManualAnsible --> SSM[AWS Systems Manager]
+    JenkinsAnsible -.->|"Planned SSM connection"| SSM
+    SSM --> Deploy[Deployment automation on EC2]
     Deploy --> Sync[Host-side Boto3<br/>secret synchronization]
     Role[EC2 IAM role] --> Parameters[Parameter Store<br/>SecureString]
     Parameters -->|KMS decryption| Sync
@@ -275,12 +290,16 @@ flowchart LR
 The workflow requests permission to mint an OIDC token only in the ECR
 publication job. AWS accepts the role session only for this repository's
 `main` branch, and the resulting policy can publish to the Ticket-API
-repository rather than to arbitrary ECR repositories. The OIDC provider,
-publisher role, and inline policy have been applied and operator-verified. The
-configured job rebuilds the image and publishes `sha-${GITHUB_SHA}` after the
-application, integration, and Docker-build jobs succeed, but actual role
-assumption and automatic publication have not yet been verified by a
-successful main-branch workflow run.
+repository. The job rebuilds the image and publishes `sha-${GITHUB_SHA}`
+after both test jobs and the Docker build succeed. A successful
+[`main` run](https://github.com/Orlando-Alvarez/Ticket-API/actions/runs/44975797065)
+confirmed role assumption and image publication.
+
+The operator's local Jenkins result confirmed AWS identity and ECR metadata
+access for the tested script. The current manual deployment runs Ansible from
+Ubuntu WSL. The dashed deployment path shows the planned Jenkins stage, with
+Ansible running inside `ticket-api-cd-agent` and connecting to EC2 through AWS
+Systems Manager. See [pipeline evidence](ci-cd.md#pipeline-behavior-and-evidence).
 
 The API and migration services use the same ECR image. The image is pulled
 before Compose runs and is selected through

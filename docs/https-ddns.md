@@ -41,7 +41,7 @@ flowchart TB
     SSM -->|EC2 role and KMS decrypt| Sync[sync_certbot_credentials.py]
     Sync --> Credentials[Root-only Cloudflare INI]
     Credentials --> Certbot[Certbot DNS-01]
-    Certbot --> Certs[/etc/letsencrypt]
+    Certbot --> Certs["/etc/letsencrypt"]
     Certs -->|read-only Docker mount| Nginx
     Certbot -->|successful renewal| Hook[Validate and reload Nginx]
 ```

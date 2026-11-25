@@ -38,7 +38,7 @@ Replace every placeholder locally. Never commit `.env`.
 | Variable | Required for | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | Host API, Alembic, integration tests | SQLAlchemy PostgreSQL URL |
-| `JWT_SECRET_KEY` | API and migration container | Signs and verifies JWTs |
+| `JWT_SECRET_KEY` | Host API, Alembic, and API/migration containers | Required by application settings. The API uses it to sign and verify JWTs. |
 | `POSTGRES_USER` | Docker Compose | PostgreSQL user |
 | `POSTGRES_PASSWORD` | Docker Compose | PostgreSQL password |
 | `POSTGRES_DB` | Docker Compose | PostgreSQL database |
