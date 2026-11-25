@@ -42,3 +42,18 @@
         status_code: 200
         timeout: 5
       changed_when: false
+
+    - name: Inspect running Ticket-API containers
+      ansible.builtin.command:
+        argv:
+          - docker
+          - ps
+          - --no-trunc
+          - --filter
+          - label=com.docker.compose.project=ticket-api
+      register: running_containers
+      changed_when: false
+
+    - name: Display current container images
+      ansible.builtin.debug:
+        var: running_containers.stdout_lines
