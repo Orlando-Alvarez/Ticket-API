@@ -45,14 +45,14 @@ pipeline{
                 '''
             }
         }
-        stage('Resolve Release Image'){
-            steps{
-                script{
+        stage('Resolve Release Image') {
+            steps {
+                script {
                     def selectedSha = params.RELEASE_SHA?.trim()
 
-                    echo "SHA lenght: ${selectedSha?.length()}"
+                    echo "SHA length: ${selectedSha?.length()}"
 
-                    if (!(selectedSha ==~ /^[0-9-f]{40}$/)) {
+                    if (!(selectedSha ==~ /^[0-9a-f]{40}$/)) {
                         error('RELEASE_SHA must contain 40 lowercase hexadecimal characters')
                     }
 
@@ -70,7 +70,7 @@ pipeline{
                             returnStdout: true
                         ).trim()
 
-                        if(!(digest ==~ /^sha256:[0-9a-f]{64}$/)) {
+                        if (!(digest ==~ /^sha256:[0-9a-f]{64}$/)) {
                             error('ECR returned an invalid image digest')
                         }
 
