@@ -211,5 +211,41 @@ pipeline{
                 )
             }
         }
+        stage('Verify Rollback Image') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Checking previous image availability..."
+
+                    test -s previous-image.txt
+
+                    PREVIOUS_IMAGE="$(cat previous-image.txt)"
+                    PREVIOUS_DIGEST="${PREVIOUS_IMAGE##*@}"
+
+                    if ! printf '%s\\n' "$PREVIOUS_DIGEST" |
+                        grep -Eq '^sha256:[0-9a-f]{64}$'; then
+                        echo "Invalid previous image digest" >&2
+                        exit 1
+                    fi
+
+                    EXPECTED_REGISTRY="891920435362.dkr.ecr.us-west-2.amazonaws.com/ticket-api"
+
+                    if [ "$PREVIOUS_IMAGE" != "$EXPECTED_REGISTRY@$PREVIOUS_DIGEST" ]; then
+                        echo "Unexpected previous image repository" >&2
+                        exit 1
+                    fi
+
+                    aws ecr describe-images \
+                        --repository-name "$ECR_REPOSITORY" \
+                        --image-ids "imageDigest=$PREVIOUS_DIGEST" \
+                        --query 'imageDetails[0].imageDigest' \
+                        --output text
+
+                    echo "Previous release is available in ECR"
+                '''
+            }
+        }
+
     }
 }
