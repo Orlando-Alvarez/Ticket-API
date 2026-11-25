@@ -99,7 +99,7 @@ pipeline{
                         )
                     }
 
-                    echo 'Deployment approved by: ${approvedBy}'
+                    echo "Deployment approved by: ${approvedBy}"
                     echo "Release digest: ${env.RELEASE_DIGEST}"
                     echo 'DRY RUN: No changes were made to EC2'
                 }
