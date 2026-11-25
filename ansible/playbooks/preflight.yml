@@ -57,3 +57,29 @@
     - name: Display current container images
       ansible.builtin.debug:
         var: running_containers.stdout_lines
+
+    - name: Inspect current API container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - container
+          - inspect
+          - ticket-api
+      register: current_api_container
+      changed_when: false
+      no_log: true
+
+    - name: Extract deployed image reference
+      ansible.builtin.set_fact:
+        deployed_image_ref: "{{ (current_api_container.stdout | from_json | first).Config.Image }}"
+      no_log: true
+
+    - name: Validate deployed image reference
+      ansible.builtin.assert:
+        that:
+          - deployed_image_ref is match('^.+/ticket-api@sha256:[0-9a-f]{64}$')
+        fail_msg: "Running API image does not use an expected immutable ECR digest"
+
+    - name: Display deployed image reference
+      ansible.builtin.debug:
+        msg: "Current API image: {{ deployed_image_ref }}"
