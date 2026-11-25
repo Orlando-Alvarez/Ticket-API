@@ -82,5 +82,26 @@ pipeline{
                 }
             }
         }
+        stage('Approve Deployment') {
+            steps {
+                script {
+                    timeout(time: 5, unit: 'MINUTES') {
+                        input(
+                            message: """Approve deployment of Ticket-API?
+
+        Commit: ${params.RELEASE_SHA}
+        Image digest: ${env.RELEASE_DIGEST}
+
+        This is a test. No EC2 deployment will occur.""",
+                            ok: 'Approve'
+                        )
+                    }
+
+                    echo 'Deployment approved'
+                    echo "Release digest: ${env.RELEASE_DIGEST}"
+                    echo 'DRY RUN: No changes were made to EC2'
+                }
+            }
+        }
     }
 }
