@@ -108,14 +108,14 @@ pipeline{
         stage('Approve Deployment') {
             steps {
                 script {
-                    timeout(time: 5, unit: 'MINUTES') {
+                    def approvedBY = timeout(time: 5, unit: 'MINUTES') {
                         input(
                             message: """Approve deployment of Ticket-API?
 
         Commit: ${params.RELEASE_SHA}
         Image digest: ${env.RELEASE_DIGEST}
 
-        This is a test. No EC2 deployment will occur.""",
+        DRY RUN: No EC2 deployment will occur.""",
                             ok: 'Approve',
                             submitter: 'Admin',
                             submitterParameter: 'APPROVED_BY'
