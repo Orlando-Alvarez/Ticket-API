@@ -157,18 +157,37 @@ pipeline{
                 timeout(time: 3, unit: 'MINUTES') {
                     sh '''
                         set -eu
-        
+
                         echo "Testing Jenkins to EC2 connectivity..."
-        
+
                         /opt/ansible/bin/ansible \
                             -i ansible/Inventory/hosts.yml \
                             ticket-api-ec2 \
                             -m ansible.builtin.command \
                             -a 'hostname'
-        
+
                         echo "SSM connectivity verified successfully"
                     '''
                 }
+            }
+        }
+        stage('Validate Deployment Playbook') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Validating deployment playbook..."
+
+                    test -n "$RELEASE_DIGEST"
+
+                    /opt/ansible/bin/ansible-playbook \
+                        -i ansible/Inventory/hosts.yml \
+                        ansible/playbooks/deploy_app.yml \
+                        --syntax-check \
+                        -e "image_digest=$RELEASE_DIGEST"
+
+                    echo "Deployment playbook validation successful"
+                '''
             }
         }
     }
