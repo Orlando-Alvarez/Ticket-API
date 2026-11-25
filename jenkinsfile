@@ -93,8 +93,8 @@ pipeline{
         Image digest: ${env.RELEASE_DIGEST}
 
         This is a test. No EC2 deployment will occur.""",
-                            ok: 'Approve'
-                            submitter: 'Admin'
+                            ok: 'Approve',
+                            submitter: 'Admin',
                             submitterParameter: 'APPROVED_BY'
                         )
                     }
