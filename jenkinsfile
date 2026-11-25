@@ -8,6 +8,14 @@ pipeline{
         timeout(time:10, unit: 'MINUTES')
     }
 
+    parameters{
+        string(
+            name: 'RELEASE_SHA',
+            defaultValue: '',
+            description: 'Full 40-character Git commit SHA published to ECR'
+        )
+    }
+
     environment{
         AWS_PROFILE = 'ticketapi-jenkins'
         AWS_DEFAULT_REGION = 'us-west-2'
@@ -37,21 +45,39 @@ pipeline{
                 '''
             }
         }
-        stage('Verify ECR images'){
+        stage('Resolve Release Image'){
             steps{
-                sh '''
-                    set -eu
+                script{
+                    def selectedSha = params.RELEASE_SHA?.trim()
 
-                    DIGEST="$(aws ecr describe-images \
-                        --repository-name "$ECR_REPOSITORY" \
-                        --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' \
-                        --output text)"
+                    if (!(selectedSHA ==~ /^[0=9-f]{40}$/)) {
+                        error('RELEASE_SHA must contain 4- lowercase hexadecimal characters')
+                    }
 
-                    test -n "$DIGEST"
-                    test "$DIGEST" != "None"
+                    withEnv(["RELEASE_SHA=${selectesSha}"]) {
+                        def digest = sh(
+                            script: '''
+                                set -eu
 
-                    echo "Image digest: $DIGEST"
-                '''
+                                aws ecr describe-image \
+                                    --repository-name "$ECR_REPOSITORY" \
+                                    --image-ids "imageTag=sha-${RELEASE_SHA}" \
+                                    --query 'imageDetails[0].imageDigest' \
+                                    --output text
+                            ''',
+                            returnStdout: true
+                        ).trim()
+
+                        if(!(digest == /^sha256:[0-9a-f]{64}$/)) {
+                            error('ECR returned an invalid image digest')
+                        }
+
+                        env.RELEASE_DIGEST = digest
+
+                        echo "Selected tag: sha-${selectedSha}"
+                        echo "Validated image digest: ${digest}"
+                    }
+                }
             }
         }
     }
