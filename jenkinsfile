@@ -50,8 +50,10 @@ pipeline{
                 script{
                     def selectedSha = params.RELEASE_SHA?.trim()
 
+                    echo "SHA lenght: ${selectedSha?.length()}"
+
                     if (!(selectedSha ==~ /^[0=9-f]{40}$/)) {
-                        error('RELEASE_SHA must contain 4- lowercase hexadecimal characters')
+                        error('RELEASE_SHA must contain 40 lowercase hexadecimal characters')
                     }
 
                     withEnv(["RELEASE_SHA=${selectedSha}"]) {
