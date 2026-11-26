@@ -5,7 +5,7 @@ pipeline{
 
     options{
         disableConcurrentBuilds()
-        timeout(time:10, unit: 'MINUTES')
+        timeout(time:30, unit: 'MINUTES')
     }
 
     parameters{
@@ -180,10 +180,14 @@ pipeline{
                         return input(
                             message: """Approve deployment of Ticket-API?
 
-        Commit: ${params.RELEASE_SHA}
-        Image digest: ${env.RELEASE_DIGEST}
+                                Commit: ${params.RELEASE_SHA}
+                                Image digest: ${env.RELEASE_DIGEST}
 
-        DRY RUN: No EC2 deployment will occur.""",
+                                REAL DEPLOYMENT
+
+                                The selected Docker image will be deployed to EC2.
+                                A PostgreSQL backup will be created before deployment.
+                                Alembic migrations may be executed.""",
                             ok: 'Approve',
                             submitter: 'Admin',
                             submitterParameter: 'APPROVED_BY'
@@ -287,6 +291,28 @@ pipeline{
                         ansible/playbooks/backup_postgres.yml
 
                     echo "PostgreSQL backup completed successfully"
+                '''
+            }
+        }
+        stage('Deploy Ticket-API') {
+            options {
+                timeout(time: 10, unit: 'MINUTES')
+            }
+
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Starting Ticket-API deployment..."
+
+                    test -n "${RELEASE_DIGEST:-}"
+
+                    /opt/ansible/bin/ansible-playbook \
+                        -i ansible/Inventory/hosts.yml \
+                        ansible/playbooks/deploy_app.yml \
+                        -e "image_digest=$RELEASE_DIGEST"
+
+                    echo "Ansible deployment completed"
                 '''
             }
         }
