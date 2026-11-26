@@ -83,7 +83,6 @@ pipeline{
                 }
             }
         }
-
         stage('Verify Release Commit') {
             steps {
                 sh '''
@@ -272,6 +271,24 @@ pipeline{
                 '''
             }
         }
+        stage('Backup PostgreSQL') {
+            options {
+                timeout(time: 4, unit: 'MINUTES')
+            }
 
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Starting PostgreSQL backup..."
+
+                    /opt/ansible/bin/ansible-playbook \
+                        -i ansible/Inventory/hosts.yml \
+                        ansible/playbooks/backup_postgres.yml
+
+                    echo "PostgreSQL backup completed successfully"
+                '''
+            }
+        }
     }
 }
