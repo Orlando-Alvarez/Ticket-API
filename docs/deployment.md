@@ -2,8 +2,8 @@
 
 [Back to the main README](../README.md)
 
-This runbook covers GitHub Actions image publication, the manual publication
-fallback, and operator-controlled Ansible deployment to EC2.
+This runbook covers approved Jenkins delivery and the Ubuntu WSL operator
+alternative. Both paths deploy ECR images by digest through Ansible and SSM.
 
 ## Current Deployment Boundary
 
@@ -105,25 +105,33 @@ selected commit, tag, and digest in the deployment evidence. See
 
 ## Jenkins Deployment Integration
 
-The local Jenkins validation reported by the operator confirmed the expected
-AWS role session and an ECR metadata lookup. Its current stages end before
-Ansible or EC2 operations. See the
-[Jenkins validation evidence](ci-cd.md#pipeline-behavior-and-evidence).
+Use the [deployment job](jenkins.md#deployment-pipeline) with an approved
+`RELEASE_SHA` published from `main`. The controller uses Git SCM and runs
+Ansible in `ticket-api-cd-agent`. The inventory reads `AWS_PROFILE` from the
+control node and falls back to `ticketapi-dev` if it is unset or empty.
+Jenkins sets it to `ticketapi-jenkins`. The `ticket_api` group selects
+`ticket-api-ec2`. Ansible connects with `amazon.aws.aws_ssm` and the Session
+Manager Plugin and uses the private transfer bucket for modules and files.
+On EC2, tasks use privilege escalation. The EC2 role pulls the image,
+reads deployment parameters and uploads PostgreSQL backups.
 
-The Jenkins role currently grants ECR metadata reads. The existing
-[inventory](../ansible/Inventory/hosts.yml) selects the `ticketapi-dev`
-profile for operator-run deployments. A Jenkins deployment stage needs an
-unattended workload identity, explicit inventory credential selection, and
-permissions for SSM session operations on the target and for transfers through
-the dedicated S3 bucket. Review those permissions against the role's boundary.
-EC2 continues to pull the image and read deployment secrets with its own role.
+Jenkins requires approval, an existing ready API and a prior digest that
+still exists in ECR. It backs up PostgreSQL before applying the new digest
+and checks the resulting container and database readiness. The manual path
+below is also used for authorized initial setup or incident intervention.
+Coordinate it with Jenkins builds because WSL does not acquire the shared
+lock. See [Disaster Recovery](disaster-recovery.md) before intervening after
+a failed deployment or rollback.
 
-The future stage should resolve the approved `sha-<commit>` tag to a digest,
-validate it, and pass it as `image_digest` to
-[`deploy_app.yml`](../ansible/playbooks/deploy_app.yml). Selecting the most
-recent push could deploy a different commit. Until that handoff,
-post-deployment checks, and rollback are tested in Jenkins, use the manual
-procedure below.
+| Repository playbook | Responsibility |
+| --- | --- |
+| [preflight.yml](../ansible/playbooks/preflight.yml) | Checks privileges, Docker, Compose and current readiness. Captures the pinned image in `previous-image.txt` when `WORKSPACE` is set. |
+| [pull_ecr_image.yml](../ansible/playbooks/pull_ecr_image.yml) | Validates the digest and pulls the image if absent using EC2 role authentication. Logs Docker out of ECR after the pull attempt. |
+| [backup_postgres.yml](../ansible/playbooks/backup_postgres.yml) | Dumps PostgreSQL and verifies the uploaded archive metadata before changes. |
+| [deploy_app.yml](../ansible/playbooks/deploy_app.yml) | Imports the pull playbook, copies deployment files, synchronizes secrets, starts the layered Compose stack and waits for readiness. |
+| [verify_deployment.yml](../ansible/playbooks/verify_deployment.yml) | Checks running and healthy container state, exact image reference and HTTP 200 readiness. |
+| [rollback_preflight.yml](../ansible/playbooks/rollback_preflight.yml) | Checks Docker, Compose, PostgreSQL and an inspectable pinned image. It can proceed without a ready API. |
+| [inspect_recovery.yml](../ansible/playbooks/inspect_recovery.yml) | Reads Docker state and readiness, prints the result, and writes `recovery-state.json` when `WORKSPACE` is set. |
 
 ## Manual ECR Publication Fallback
 
@@ -323,6 +331,12 @@ When the digest already exists, authentication and download are skipped.
 
 ## Deploy Ticket-API
 
+For the manual path, select an approved image digest and review the checkout
+that will supply the deployment files. Confirm no Jenkins job is changing the
+host. For an existing database, create and verify a
+[pre-change backup](backup-and-restore.md#backup-flow) before running the
+playbook. This manual command does not invoke the Jenkins backup stage.
+
 ```bash
 ansible-playbook \
   -i ansible/Inventory/hosts.yml \
@@ -332,6 +346,12 @@ ansible-playbook \
 
 `deploy_app.yml` imports `pull_ecr_image.yml`, so a separate pull is not
 required for normal deployment.
+
+The Jenkins and WSL paths both copy the Compose files and Nginx
+configuration from the Ansible checkout. The image is pinned through
+`TICKET_API_IMAGE`, but configurations can come from a different commit than
+the image. Review the release and deployment revision together, especially
+when rolling back.
 
 The deployment:
 
@@ -488,8 +508,8 @@ evidence is linked in [Automated ECR Publication](#automated-ecr-publication).
 ## Current Deployment Limitations
 
 - The documented manual publisher remains available as a fallback.
-- Deployment and digest selection remain manual operator actions. Jenkins
-  currently checks AWS identity and reads ECR metadata.
+- Jenkins requires approval and an interactive temporary AWS source session.
+  The manual WSL path requires separate coordination.
 - ECR registry values are environment-specific in the current playbooks.
 - The inventory uses a static EC2 instance ID.
 - Nginx terminates TLS on one EC2 instance; there is no load balancer, Elastic
@@ -500,6 +520,10 @@ evidence is linked in [Automated ECR Publication](#automated-ecr-publication).
   Compose still requires a root-only local `.env` copy.
 - Secret synchronization is environment-specific and rotation is not
   automated.
-- PostgreSQL uses a host-bound Docker volume without automated backups.
-- No automated rollback, release promotion, monitoring, or alerting exists.
+- PostgreSQL uses a host-bound volume. Pre-change backups run in Jenkins.
+  Scheduled backups and recurring restore drills remain future work.
+- Rollback requires a separate approved job. Database restoration and
+  migration reversal remain operator decisions.
+- Monitor failed stages with the [operator recovery runbook](disaster-recovery.md).
+  Centralized monitoring and alerting remain future work.
 

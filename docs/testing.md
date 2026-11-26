@@ -3,8 +3,8 @@
 [Back to the main README](../README.md)
 
 Ticket-API separates fast application tests, PostgreSQL integration tests,
-GitHub Actions CI and image publication, local Jenkins validation, and manual
-infrastructure and deployment checks.
+GitHub Actions CI and image publication, Jenkins delivery checks, and
+operator-reported infrastructure and recovery tests.
 
 ## Static Analysis
 
@@ -133,31 +133,28 @@ boundary.
 
 ## Jenkins Pipeline Validation
 
-Use the controller's Declarative Pipeline linter to check the repository-root
-[`jenkinsfile`](../jenkinsfile). From Bash, set `JENKINS_USER` to your local
-Jenkins user and enter your Jenkins API token at the password prompt.
+Use the controller's Declarative Pipeline linter from the repository root.
+From Bash, set `JENKINS_USER` to your local user and enter your Jenkins API
+token at the password prompt. The SCM paths are
+[`Jenkinsfile`](../Jenkinsfile) and [`Jenkinsfile.rollback`](../Jenkinsfile.rollback).
 
 ```bash
-curl --fail-with-body --user "$JENKINS_USER" \
-  --form 'jenkinsfile=<jenkinsfile' \
-  http://localhost:18081/pipeline-model-converter/validate
+for pipeline in Jenkinsfile Jenkinsfile.rollback; do
+  curl --fail-with-body --user "$JENKINS_USER" \
+    --form "jenkinsfile=<$pipeline" \
+    http://localhost:18081/pipeline-model-converter/validate || break
+done
 ```
 
 Check for `Jenkinsfile successfully validated.` in the response. The linter
 checks declarative syntax. AWS behavior is tested at runtime.
 [Jenkins Declarative Pipeline linter](https://www.jenkins.io/doc/book/pipeline/development/#command-line-pipeline-linter)
 
-To test before commit, use a local **Pipeline script** job, paste the script,
-and run it on the online node labeled `ticket-api-cd`. The pipeline reads the
-case-sensitive STS response field with `--query Arn`. See
-[pipeline behavior and evidence](ci-cd.md#pipeline-behavior-and-evidence).
-
-The operator reported a successful toolchain validation and a local AWS
-validation ending with `Finished: SUCCESS`. In the tested script, that result
-means STS returned the expected assumed-role identity and ECR returned a
-non-empty digest. The local test covers that lab session only. Ansible,
-SSM connectivity from Jenkins, EC2 changes, and rollback are outside the
-job's current stages.
+Review each linter response. It checks the declarative structure and cannot
+validate shell argument boundaries, credentials, or live AWS behavior.
+Use syntax-only checks before commit. An inline copy of either current
+pipeline can execute production operations if run and approved. See
+[Jenkins job configuration](jenkins.md#pipeline-definitions-and-syntax-checks).
 
 ## Configuration Validation
 
@@ -260,11 +257,29 @@ deployment as unchanged.
 These are operator-run checks. The GitHub Actions run above provides separate
 evidence of automated ECR publication.
 
-No automated test currently exercises live KMS, Parameter Store, IAM,
-Cloudflare, ACME, systemd, or certificate renewal. DDNS unit tests mock external
-calls. Repository checks can validate Terraform and Ansible syntax and Python
-logic statically, but live authorization, DNS propagation, TLS, and encrypted
-value consistency remain operator-run checks.
+The application suite does not exercise live KMS, Parameter Store,
+Cloudflare, ACME, systemd, or certificate renewal. DDNS unit tests mock
+external calls. Delivery preflight and verification exercise the specific
+AWS and runtime paths described in [Jenkins Operations](jenkins.md).
+
+## Operator-Verified Delivery Evidence
+
+The following results were reported by the operator. The release identifiers
+describe historical runs and do not identify the currently active release.
+
+| Scenario | Reported result |
+| --- | --- |
+| Jenkins deployment | `SUCCESS` from `a4205d5de9d08e616231111c14f85ecb316d3126` to `99a45f5e7a69cf47e1c07584c0b43c8a3c65c9cd`. New digest `sha256:b4214bf194e16ae82d2b90c92fc4ab3687f394e2d19f625884ff7d86650e6f3d`. |
+| Controlled rollback | `SUCCESS` from `99a45f5` to `a4205d5`. Restored digest `sha256:456b23568de3adabcbf9deef2fa178843d9043105e5284455edf8d41200dab59`. The current rollback source has a [shell caveat](jenkins.md#controlled-rollback) requiring a separate retest. |
+| PostgreSQL backup | Custom archive created, catalog checked, uploaded to S3, and encryption metadata verified. |
+| PostgreSQL restore | Manual restore succeeded in an isolated PostgreSQL container. |
+| Shared lock | Two independent Jenkins jobs exercised serialization. One held the resource about 45 seconds and the waiting job completed in about 90 seconds. |
+| Recovery inspection | WSL rollback preflight and recovery inspection were exercised. An independent Jenkins inspection produced and archived `recovery-state.json`. Recovery simulations exercised `recovery-report.txt` archival and both before- and after-initiation paths without intentionally damaging the running API. |
+| Unknown release | A 40-zero `RELEASE_SHA` returned ECR `ImageNotFoundException`. Backup and deployment were skipped, Jenkins reported that deployment had not started and no application rollback was indicated, and the shared lock was released. The expected result was `FAILURE`. |
+
+Pending coverage includes scheduled restore drills and measured RPO/RTO,
+timeout and agent-loss scenarios, rollback shell regression checks, and
+release/configuration compatibility under failure.
 
 ## Evidence Worth Capturing
 

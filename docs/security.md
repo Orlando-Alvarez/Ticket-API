@@ -161,9 +161,9 @@ The tokens should be scoped to the required Cloudflare zone and DNS actions.
 | `ticketapi-tf` | Assumes the Terraform deployer role |
 | `ticketapi-dev` | Starts SSM sessions and accesses the Ansible transfer bucket |
 | GitHub ECR publisher role | Accepts short-lived OIDC sessions only from this repository's `main` branch and pushes to its ECR repository |
-| Jenkins development role | Uses an STS role session for repository-scoped ECR metadata reads |
+| Jenkins deployment role | Uses an STS role session for ECR metadata, scoped SSM sessions, and temporary Ansible transfer objects |
 | Authorized publisher profile | Supports the verified manual ECR publication fallback |
-| EC2 instance role | Registers with SSM, pulls from ECR, and decrypts the four deployment secrets |
+| EC2 instance role | Registers with SSM, pulls from ECR, decrypts the four deployment secrets, and reads and uploads PostgreSQL backup objects |
 
 The EC2 role is named `ticket-api-dev-ec2-ssm-role` with the current defaults.
 It uses AWS-managed Systems Manager core and ECR pull-only policies plus the
@@ -192,7 +192,7 @@ runtime access and are not fully represented as code. See
 [AWS Infrastructure](aws-infrastructure.md#terraform-controller-bootstrap) for
 the reproducibility limitation and hardening direction.
 
-### Jenkins Lab Identity
+### Jenkins Execution Identity
 
 The `ticketapi-jenkins` profile uses temporary credentials from an interactive
 development IAM user session as its source identity. The trust policy in
@@ -200,6 +200,9 @@ development IAM user session as its source identity. The trust policy in
 to use `sts:AssumeRole` for `ticket-api-dev-jenkins-deployer`. The resulting
 role session is a separate identity. The role's inline policy grants
 `ecr:DescribeImages` and `ecr:ListImages` on the Ticket-API repository.
+A separate inline policy scopes SSM session start to the configured EC2
+instance and shell document. It grants session and data-channel operations
+subject to its conditions, plus scoped access to the Ansible transfer bucket.
 
 `TicketAPI-Jenkins-PermissionsBoundary` is an existing managed policy
 referenced by Terraform. It limits the permissions the role's identity
@@ -214,13 +217,27 @@ container. The assumed role's boundary applies to that role, so source
 credentials retain their own permissions. Keep this agent restricted to
 trusted jobs and exclude untrusted public pull request code. Keep AWS access
 keys, tokens, and AWS configuration with credentials out of Dockerfiles,
-`jenkinsfile`, images, and Git.
+`Jenkinsfile`, `Jenkinsfile.rollback`, images, and Git.
 
-Before enabling unattended deployment, use a dedicated renewable workload
-identity with short-lived sessions, isolate the agent from untrusted jobs,
-and scope access to the required ECR metadata, SSM target, and S3 transfer
-resources. Review the role's trust and permissions boundary along with its
-identity policies. EC2 retains its separate pull and secret-read permissions.
+IAM Roles Anywhere is a candidate for renewable workload credentials.
+The agent currently has no `aws_signing_helper`, and the workflows still
+rely on interactive source credentials. Treat certificate and trust-anchor
+lifecycle, agent isolation, and scoped permissions as design requirements
+for a non-interactive identity.
+
+### Approval and SCM Access
+
+The deployment job restricts approval to `Admin` and times it out after
+five minutes. The rollback job also requires input, but its Jenkinsfile
+does not specify a `submitter` restriction or a separate approval timeout.
+Review the controller's build and approval permissions before granting
+access. A SHA on `main` constrains the release image. The SCM branch supplies
+the actual Jenkins and Ansible code that will run. Protect it and keep
+untrusted branches and public pull requests off the deployment agent.
+
+Console logs and artifacts can contain role session identifiers, inventory
+details, registry addresses, and failure diagnostics. Restrict their
+visibility and retention. Share only redacted summaries.
 
 ## Systems Manager Instead of SSH
 
@@ -239,7 +256,7 @@ Session Manager Plugin, Boto3, Botocore, and CRT authentication support.
 - Tags are immutable.
 - Basic scanning runs on push.
 - Images use AES-256 server-side encryption.
-- A lifecycle policy keeps the 10 most recent images.
+- The lifecycle policy expires untagged images 90 days after push.
 - Deployments select an exact SHA-256 digest.
 - EC2 receives pull-only access.
 
@@ -264,6 +281,20 @@ declaration has no permissions boundary.
 
 Image signing, provenance attestations, vulnerability gates, and automated
 promotion are not implemented.
+
+## Backup Data Protection
+
+PostgreSQL archives are written under a root-only EC2 directory and uploaded
+using the EC2 role to the separate private backup bucket. Uploads use SSE-S3
+with `AES256`, which is distinct from the KMS encryption used for Parameter
+Store. Versioning and lifecycle rules manage retention. Terraform's
+`prevent_destroy` guard does not provide S3 Object Lock. The Jenkins role's
+temporary S3 access applies to the transfer bucket.
+
+Dumps can contain password hashes and other application data. Restrict
+downloads to approved restore identities and keep restore drills isolated.
+Review the [backup runbook](backup-and-restore.md) for access, retention and
+verification.
 
 ## TLS and Certificate Handling
 
@@ -316,9 +347,10 @@ Operator-run checks have confirmed:
 - Successful simulated certificate renewal and deploy-hook reload
 - Enabled DDNS and certificate-renewal systemd timers
 
-These results cover operator-run deployment checks. GitHub OIDC and ECR
-publication have separate workflow evidence, and Jenkins has a separate
-operator-reported local validation. See [CI/CD and Image Delivery](ci-cd.md).
+These results cover operator-run infrastructure checks. Separate evidence
+records GitHub publication, Jenkins delivery and rollback, backup uploads,
+and one isolated restore. See
+[operator-verified delivery evidence](testing.md#operator-verified-delivery-evidence).
 
 ## Infrastructure Data
 
@@ -340,8 +372,7 @@ operator-reported local validation. See [CI/CD and Image Delivery](ci-cd.md).
    reproducibly without storing plaintext in Terraform state.
 5. Move Terraform state to an encrypted remote backend with locking.
 6. Bring remaining manual IAM permissions under reviewed code.
-7. Define PostgreSQL backups, restore testing, retention, and disaster
-   recovery.
+7. Schedule backups, define local cleanup and automate isolated restore drills.
 8. Add centralized logs, metrics, dashboards, and alerts.
 9. Add automated dependency, container, deployment, and security checks.
 10. Add image signing, provenance, and promotion controls.

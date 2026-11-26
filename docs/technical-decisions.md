@@ -72,7 +72,7 @@ layered Docker Compose files for local, production-like, and AWS execution.
 
 **Decision:** Run application tests, PostgreSQL migration and integration
 tests, Docker build validation, and ECR publication in GitHub Actions.
-Develop the deployment workflow separately in Jenkins.
+Run approved deployment and rollback separately in Jenkins.
 
 **Benefits**
 
@@ -83,8 +83,8 @@ Develop the deployment workflow separately in Jenkins.
 - Keeps the workflow and its permissions reviewable with the source.
 - Keeps the GitHub publisher focused on ECR and lets deployment use a
   separately scoped identity.
-- Lets the Docker agent carry the Ansible, Python, AWS CLI, and Session
-  Manager tooling required for future deployment stages.
+- Gives the Docker agent the Ansible, Python, AWS CLI, and Session Manager
+  tooling used for deployment.
 
 **Tradeoffs**
 
@@ -95,12 +95,10 @@ Develop the deployment workflow separately in Jenkins.
 - A GitHub Actions-only pipeline would reduce the number of systems to operate.
   The split lets this project develop a dedicated deployment runner while
   keeping the existing CI workflow and publisher permissions focused.
-- Interactive lab credentials can expire and expose source credentials to
-  agent jobs. Deployment remains operator-triggered until identity, SSM and
-  S3 permissions, commit selection, readiness, and recovery are validated.
+- Interactive source credentials can expire during operation and remain
+  accessible to processes in the agent. Workload identity renewal is planned.
 
-See [CI/CD and Image Delivery](ci-cd.md) for the successful GitHub publication
-run and the scope of the operator-reported Jenkins validation.
+See [CI and Delivery](ci-cd.md) for publication and Jenkins evidence.
 
 ## Terraform for Infrastructure Provisioning
 
@@ -226,7 +224,9 @@ its ECR SHA-256 digest.
 - The operator must resolve and record the digest before deployment.
 - The current workflow does not generate provenance or cryptographic
   signatures.
-- No automated promotion, deployment approval, or rollback mechanism exists.
+- Jenkins requires approval for deployment and for the separate rollback job.
+  The image digest is immutable. Playbooks and runtime configuration come
+  from the current SCM checkout and may represent another commit.
 
 ## Docker Compose at the Current Scale
 
@@ -244,6 +244,34 @@ on one EC2 instance.
 - One host is a single point of failure.
 - There are no rolling deployments, replica scheduling, or automatic failover.
 - PostgreSQL storage is tied to the host.
+
+## EC2, Compose, and PostgreSQL at the Current Scale
+
+The repository uses a single EC2 host with Docker Compose and a PostgreSQL
+volume. The following alternatives describe engineering trade-offs of the
+current design. They do not represent historical evaluations.
+
+| Current decision | Alternative | Consequence and limit |
+| --- | --- | --- |
+| EC2 with SSM | ECS | Exposes Linux host configuration and keeps the existing Ansible workflow. The operator owns OS maintenance, the Docker daemon and host recovery. |
+| Docker Compose | Kubernetes | Reuses a small service graph locally and on EC2. Scaling, node scheduling and rolling replacement require a different runtime design. |
+| PostgreSQL in Docker | Amazon RDS | Keeps the database lifecycle explicit and the topology portable for local use. Backups, restores, storage sizing and availability remain operator responsibilities. |
+
+## Approved Changes and Operator-Controlled Recovery
+
+**Context.** Updating an image can restart the workload and run Alembic
+migrations on the same host that stores live data.
+
+| Decision | Rationale and alternative | Consequence and limit |
+| --- | --- | --- |
+| Manual approval for both Jenkins jobs | Allows review of release identity, backup implications, and runtime intent before mutation. Unattended deployment would require stronger automated evidence. | Approval adds wait time and depends on controller authorization. |
+| Separate rollback job | Rechecks the expected running image and historical target independently. A rollback nested in the deployment job would couple recovery to the failing execution. | The operator chooses when to run it. Its path-based Git guard is incomplete and the current source caveat must be reviewed. |
+| Shared Jenkins lock | Serializes work on the same EC2 target across jobs. Per-job concurrency alone permits overlap between deployment and rollback. | Jobs can wait for approval while holding the lock. WSL and external automation require coordination. |
+| PostgreSQL backup before a change | Creates a recovery point independent of the image release. A local dump alone remains exposed to EC2 loss. | Backups take time and disk space. S3 metadata checks complement an isolated restore test. |
+| Failure diagnostics with operator decision | Captures observed state and lets the operator account for migrations and partial failures. | The job reports the evidence and leaves rollback classification to the operator. An abort or lost agent can prevent artifact collection. |
+| PostgreSQL restoration as a separate operation | Preserves live writes during image rollback. Automatic restoration could discard writes and obscure partial migrations. | Restoring data requires an isolated drill and an approved plan for any production recovery. |
+
+See [Jenkins Operations](jenkins.md) and [Disaster Recovery](disaster-recovery.md).
 
 ### Optional Kubernetes Learning Environment
 
@@ -286,8 +314,9 @@ consistency.
 **Tradeoffs**
 
 - Data persistence depends on a named volume on one EC2 host.
-- Backups, restore tests, replication, upgrades, and disaster recovery are not
-  automated.
+- Jenkins runs pre-change logical backups with off-host storage.
+  An isolated manual restore was reported. Scheduled backups, recurring
+  restore validation, replication, and automated failover are future work.
 - A managed database may become appropriate when operational requirements
   justify it.
 

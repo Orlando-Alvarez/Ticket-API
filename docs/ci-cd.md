@@ -1,282 +1,107 @@
-# CI/CD and Image Delivery
+# Continuous Integration and Delivery
 
-[Back to the main README](../README.md)
+[Back to the main README](../README.md) · [Jenkins Operations](jenkins.md)
 
-This document describes the GitHub Actions workflow, its AWS federation
-boundary, the local Jenkins validation pipeline, and the operator-controlled
-handoff from ECR to EC2.
+GitHub Actions performs continuous integration and publishes images. Jenkins
+performs continuous delivery to EC2. The release can be validated and prepared
+automatically, then an operator approves the runtime change. Continuous
+deployment would apply eligible changes without that approval step.
 
-## Current Status
+## GitHub Actions Workflow
 
-| Capability | Status | Evidence boundary |
-| --- | --- | --- |
-| Ruff and application tests | Implemented | Defined in `.github/workflows/ci.yml` |
-| PostgreSQL migration and integration tests | Implemented | PostgreSQL 16 service and isolated `ticket_api_test` database |
-| Docker image build | Implemented | Gated on both test jobs |
-| AWS OIDC and publisher IAM foundation | Applied and operator-verified | Terraform created the provider, dedicated role, and inline ECR policy |
-| GitHub Actions role assumption and ECR publication | Verified in GitHub Actions | The [main run](https://github.com/Orlando-Alvarez/Ticket-API/actions/runs/44975797065) completed OIDC authentication, ECR login, and image push |
-| Jenkins toolchain and AWS validation | Operator-reported local success | The agent tooling was checked, and a local job verified the STS identity and retrieved an ECR digest. See [pipeline behavior and evidence](#pipeline-behavior-and-evidence). |
-| EC2 deployment | Manual | Ansible deploys a selected digest through Systems Manager |
-| Jenkins-driven continuous deployment | In development | Workload identity, deployment permissions, commit-to-digest selection, and deployment stages are pending |
-
-The GitHub run also completed the application, PostgreSQL, and Docker build
-jobs. Image publication and EC2 deployment have separate execution paths.
-
-## Workflow Triggers
-
-The workflow runs for:
-
-- Pushes to `main`
-- Pushes to `feat/**`
-- Pull requests targeting `main`
-
-Image publication has an additional job-level condition. It runs only for a
-`push` event whose ref is exactly `refs/heads/main`. Pull requests and feature
-branches can validate the application and image build but cannot reach the
-publication job.
-
-## Job Graph
+[`ci.yml`](../.github/workflows/ci.yml) runs for pushes to `main` and `feat/**`
+and pull requests targeting `main`. `publish-ecr` requires a push event on
+`refs/heads/main`, including a merge that updates the branch.
 
 ```mermaid
 flowchart LR
-    Event[Push or pull request] --> Test[Ruff and application tests]
-    Event --> PG[PostgreSQL 16<br/>migrations and integration tests]
-    Test --> Docker[Docker build]
-    PG --> Docker
-    Docker --> Condition{Push to main?}
-    Condition -->|No| Complete[Validation complete]
-    Condition -->|Yes| OIDC[GitHub OIDC<br/>assume AWS role]
-    OIDC --> Login[ECR login]
-    Login --> Publish[Build and push<br/>sha-commit tag]
-    Publish --> ECR[Private ECR]
-    Controller[Jenkins controller] -->|"WebSocket agent connection"| Agent[Jenkins Docker agent]
-    Agent -->|"Assume role and verify caller"| STS[AWS STS]
-    Agent -->|"Read image metadata"| ECR
-    ECR -->|"Operator selects digest"| Operator[Operator]
-    Operator --> Ansible[Ansible deployment]
-    Agent -.->|"Planned deployment stage"| Ansible
-    Ansible --> SSM[Systems Manager]
-    SSM --> EC2[EC2]
+    Event[Matching push or PR] --> App[Ruff and application tests]
+    Event --> PG[PostgreSQL 16 integration and Alembic]
+    App --> Build[Docker build]
+    PG --> Build
+    Build --> Gate{Push to main?}
+    Gate -->|Yes| OIDC[Assume ECR publisher role through OIDC]
+    OIDC --> Publish[Build and push commit tag]
+    Publish --> Registry[(Private ECR)]
+    Gate -->|No| Done[Validation complete]
 ```
 
-### Application Test Job
-
-- Runs on Ubuntu with Python 3.12.
-- Installs the project with the `test` dependency group.
-- Runs Ruff against `app`, `tests`, and the Cloudflare DDNS script.
-- Runs Pytest with `tests/integration` excluded.
-- Uses test-only placeholder configuration and does not connect to a real
-  development or production database.
-
-### PostgreSQL Integration Job
-
-- Starts `postgres:16-alpine` as a service.
-- Uses the isolated database name `ticket_api_test` required by the migration
-  safety guard.
-- Applies `alembic upgrade head` before the integration suite.
-- Validates PostgreSQL-specific constraints, migrations, and atomic repeated
-  soft-deletion behavior.
-
-### Docker Build Job
-
-- Depends on both test jobs.
-- Builds `ticket-api:ci` from the repository Dockerfile.
-- Does not push the image or pass it as an artifact to another job.
-
-### ECR Publication Job
-
-- Depends on the Docker build job.
-- Runs only for `push` events on `main`, including merge commits.
-- Checks out the exact workflow revision.
-- Exchanges a GitHub OIDC token for short-lived AWS credentials.
-- Logs in to the private ECR registry.
-- Rebuilds and pushes `sha-${GITHUB_SHA}` to `ticket-api` in `us-west-2`.
-
-The publication job currently builds the image a second time. Therefore, the
-Docker build job validates that the source can build, while the publication
-job creates the registry artifact independently. A stronger future design
-would build once, identify the resulting digest, and promote that exact
-verified artifact.
-
-## Permissions and Trust Boundaries
-
-The workflow defaults to `contents: read`. Only the publication job adds
-`id-token: write`, which is required for GitHub to issue the OIDC token used by
-AWS STS.
-
-Terraform defines:
-
-1. An IAM OIDC provider for `https://token.actions.githubusercontent.com` with
-   the `sts.amazonaws.com` audience.
-2. A dedicated publisher role whose trust policy requires the exact subject
-   `repo:Orlando-Alvarez/Ticket-API:ref:refs/heads/main`.
-3. An inline policy allowing ECR authentication and limiting repository
-   operations used for publication to the Ticket-API repository ARN.
-
-The role is not the EC2 instance role. EC2 remains pull-only. It is also not
-the Terraform controller or Ansible operator identity. This separation keeps
-image publication, runtime access, configuration management, and
-infrastructure provisioning in distinct permission domains.
-
-GitHub Actions uses temporary credentials. The role ARN used by the
-workflow is an infrastructure identifier rather than a secret, but its current
-hard-coded value is environment-specific and should eventually be configured
-without duplicating account-specific values in workflow source.
-
-## Local Jenkins Validation
-
-The Docker-based lab runs `ticket-api-jenkins` from
-`jenkins/jenkins:lts-jdk21` at <http://localhost:18081>. The inbound
-`ticket-api-cd-agent` connects over WebSocket on the shared
-`ticket-api-jenkins-net` Docker network. Docker volumes persist
-`/var/jenkins_home` on the controller and `/home/jenkins/agent` on the agent.
-Controller setup, agent registration, and profile configuration are manual.
-
-The [agent Dockerfile](../jenkins/agent/Dockerfile) uses
-`jenkins/inbound-agent:jdk21` and targets Linux x86-64 for AWS CLI v2 and the
-Session Manager Plugin. It includes Git, Python, Ansible Core in a virtual
-environment, Boto3, Botocore with CRT support, and the `amazon.aws` and
-`community.docker` collections. See the [README setup](../README.md#jenkins-setup-and-local-testing)
-for the image build command.
-
-The `ticketapi-jenkins` profile uses an interactive, temporary source session
-from a development IAM user to assume `ticket-api-dev-jenkins-deployer`.
-`TicketAPI-Jenkins-PermissionsBoundary` caps the role's identity-policy
-permissions. The inline policy allows `ecr:DescribeImages` and `ecr:ListImages`
-on `ticket-api`. See the [security model](security.md#jenkins-lab-identity)
-for source credential exposure and requirements for unattended use.
-
-### Pipeline Behavior and Evidence
-
-The local [`jenkinsfile`](../jenkinsfile) runs on label `ticket-api-cd`,
-serializes builds of the job with `disableConcurrentBuilds()`, and applies a
-10-minute timeout. It sets `AWS_PROFILE=ticketapi-jenkins`,
-`AWS_DEFAULT_REGION=us-west-2`, and `ECR_REPOSITORY=ticket-api`.
-
-| Stage | Behavior |
+| Job | Inputs and checks |
 | --- | --- |
-| `Verify AWS Identity` | Calls `aws sts get-caller-identity` and checks the resulting ARN against the expected account and assumed Jenkins role. An unexpected value fails the job. |
-| `Verify ECR images` | Calls `aws ecr describe-images`, sorts by `imagePushedAt`, selects the newest image digest, and rejects empty or `None` results. |
+| `test` | Python 3.12, test extra, Ruff on `app`, `tests` and the DDNS script, followed by Pytest excluding `tests/integration` |
+| `postgres` | PostgreSQL 16 service with disposable `ticket_api_test`, `alembic upgrade head`, and the PostgreSQL integration tests |
+| `docker` | Waits for both test jobs and builds `ticket-api:ci` |
+| `publish-ecr` | Waits for the Docker job. Gets a short-lived AWS session, logs in to ECR, rebuilds the image, and pushes `sha-${GITHUB_SHA}` |
 
-The operator reported `Finished: SUCCESS` after the locally tested script
-confirmed the expected role session and retrieved a SHA-256 digest from ECR.
-The repository-root `jenkinsfile` selects the case-sensitive STS response
-field with `--query Arn`.
-[AWS CLI response fields](https://docs.aws.amazon.com/cli/latest/reference/sts/get-caller-identity.html#output)
+The Docker build job verifies that the image builds. Publication creates a
+separate build. Promoting the exact tested image or a signed release bundle
+remains future work. The
+[successful main run](https://github.com/Orlando-Alvarez/Ticket-API/actions/runs/44975797065)
+shows both test jobs, Docker build, role assumption, ECR login, and image
+publication succeeding.
 
-The ECR check establishes metadata access. It selects by push time and checks
-for a value. The future deployment stage must select the expected commit tag
-and verify its digest before handing it to Ansible.
+## Image Identity and Trust Boundaries
 
-### Test the Pipeline Before Commit
+| Identifier | Meaning |
+| --- | --- |
+| Git commit SHA | Identifies a source revision. Both Jenkins jobs expect full 40-character lowercase hexadecimal SHAs |
+| Docker image tag | Registry name `sha-<commit>` assigned by the workflow. ECR enforces immutability |
+| Registry image digest | Content identifier of an image manifest or index. Deployment pins `<repository>@sha256:<digest>` |
+| Local Docker image ID | Docker daemon's identifier for the local image, typically the image config digest. Compare the container's configured repository digest when verifying a deployment |
 
-1. Build the agent image and bring the `ticket-api-cd` node online with an
-   authorized, active lab profile.
-2. Run the [Declarative Pipeline linter](testing.md#jenkins-pipeline-validation)
-   against the exact script text. It validates the pipeline structure.
-3. In a local Pipeline job, select **Pipeline script**, paste the script, and
-   run it on the validation agent.
-4. Review both stages and keep any caller identifiers or session details
-   private. For **Pipeline script from SCM**, use the exact lowercase
-   `jenkinsfile` path after the file is available on the selected branch.
+GitHub Actions defaults to `contents: read`. The publication job alone adds
+`id-token: write`. AWS trust requires the GitHub OIDC provider, the
+`sts.amazonaws.com` audience, and the exact repository subject for `main`.
+The publisher can authenticate to ECR, with upload operations limited to
+`ticket-api`. Jenkins uses a separate STS role based on the temporary
+`ticketapi-jenkins` profile. The EC2 runtime pulls images with its instance
+role. See [Security](security.md#aws-identity-separation).
 
-## Image Identity and Deployment Handoff
+The [ECR lifecycle rule](../terraform/ecr.tf) expires untagged images 90 days
+after push. This rule does not count or expire tagged releases. Always check
+that a rollback candidate is still available.
 
-ECR tags are immutable. The workflow's tag format is:
+## Jenkins Release Handoff
 
-```text
-sha-<full 40-character Git commit SHA>
-```
+[`Jenkinsfile`](../Jenkinsfile) resolves `RELEASE_SHA` to the immutable commit
+tag and validates its digest and ancestry in `origin/main`. After local tooling
+and syntax checks, an operator approves the release. Jenkins verifies SSM and
+EC2 prerequisites, records the previous pinned image, checks its availability
+in ECR, runs the PostgreSQL backup, then deploys and verifies the new digest
+through Ansible. Jenkins consumes ECR images without a Docker build.
 
-Before deployment, an operator resolves that tag to the ECR image digest and
-records both values:
+[`Jenkinsfile.rollback`](../Jenkinsfile.rollback) resolves both `CURRENT_SHA`
+and `ROLLBACK_SHA`. The job checks ancestry, selected file differences,
+and the currently deployed digest. After approval and backup it checks the
+current digest again, applies the target digest and verifies it. The
+[rollback runbook](jenkins.md#controlled-rollback) describes the safety gate
+and the shell issue observed in the current source.
 
-```bash
-IMAGE_TAG="sha-<full-commit-sha>"
+Both jobs use `disableConcurrentBuilds()` and share the
+`ticket-api-ec2-deployment` lock. The lock coordinates builds on the same
+controller. Authorized WSL operations must be coordinated separately.
 
-aws ecr describe-images \
-  --repository-name ticket-api \
-  --image-ids "imageTag=${IMAGE_TAG}" \
-  --query 'imageDetails[0].imageDigest' \
-  --output text \
-  --region us-west-2
-```
+The deployment failure handler skips diagnostics before the modifying phase.
+After that phase begins, it attempts to inspect EC2 and archive the result
+for an operator decision. See [Disaster Recovery](disaster-recovery.md) and
+[Backup and Restore](backup-and-restore.md).
 
-Ansible then deploys `<repository>@sha256:<digest>`. The workflow does not edit
-the EC2 environment, invoke Ansible, or restart the application. This manual
-handoff is an intentional release boundary until reviewed deployment approval,
-health verification, and rollback are automated.
+Ansible copies runtime configuration from the Jenkins SCM checkout.
+The selected image's commit can differ from that checkout. The rollback Git
+diff covers specific paths and does not prove deployment configuration or
+database compatibility. See [Deployment](deployment.md) for the manual path.
 
-The current Jenkins job ends after the ECR lookup. The future deployment
-stage will hand an approved digest to the [existing Ansible runbook](deployment.md#jenkins-deployment-integration).
-
-## Verification Checklist
-
-Use this checklist to verify any future publication on `main`:
-
-1. Confirm the test, PostgreSQL, and Docker jobs succeed.
-2. Confirm the ECR publication job is selected only for the `main` push.
-3. Confirm AWS credential configuration reports successful role assumption.
-4. Confirm the immutable `sha-<commit>` tag exists in ECR for that revision.
-5. Resolve the tag to a `sha256:` digest and compare it with the registry
-   result.
-6. Confirm no AWS access-key secrets were added to the repository or GitHub.
-7. Capture redacted evidence that omits account IDs, registry hostnames, role
-   ARNs, session identifiers, tokens, and environment values.
-
-## Troubleshooting
-
-### Publication Job Is Skipped
-
-Confirm that the run is for a `push` event on `main` and that all upstream
-jobs succeeded. Pull requests and feature-branch pushes skip publication.
-
-### OIDC Role Assumption Fails
-
-Compare the token audience, repository owner/name, branch ref, IAM provider,
-and workflow `id-token` permission with the Terraform trust policy. Do not
-weaken the subject to a wildcard merely to make federation succeed.
-
-### ECR Push Is Denied
-
-Confirm that the configured repository name matches the Terraform-managed ECR
-repository and that the publisher policy is attached to the assumed role. Do
-not add broad ECR permissions when one repository ARN is sufficient.
-
-### Immutable Tag Already Exists
-
-The full commit-derived tag should identify one source revision. If it already
-exists, inspect whether the workflow is replaying a published commit. Do not
-make tags mutable; select the existing digest or define a deliberate retry
-policy that preserves artifact identity.
-
-### Published Image Differs from the Validation Build
-
-The current jobs build independently. Treat this as a known provenance gap,
-not as proof of tampering. The planned remediation is to build once and carry
-the same digest through validation, publication, and deployment.
-
-### Jenkins Agent and AWS Errors
+## Troubleshooting Publication
 
 | Symptom | Check |
 | --- | --- |
-| Agent offline or job queued | Confirm that the inbound node is online, has label `ticket-api-cd`, can reach the controller over the shared Docker network, and has an active WebSocket connection. |
-| AWS profile missing | Check profile availability as the container's Jenkins user. The profile must be available inside the agent where the shell step runs. |
-| Session expired | Renew the interactive source session using the approved lab procedure and check the assumed role again. |
-| `AccessDenied` when assuming the role | Check the source identity's authorization, the role trust policy, and any applicable policy restrictions. |
-| `AccessDenied` when reading ECR | Check the assumed identity, region, repository, inline policy, and permissions boundary. |
-| Caller query returns `None` | Check the case-sensitive selector. Use `--query Arn` for the AWS response field. |
-| ECR query returns `None` or no digest | Check `ticket-api` in `us-west-2`, verify it contains images, and verify the requested tag if performing a tag-based lookup. |
+| Publication skipped | Verify a push event to `main` and successful upstream jobs |
+| OIDC denied | Check the event and ref, job permission, exact trust subject and AWS audience |
+| ECR push denied | Check the publisher role, region, and repository permissions |
+| Immutable tag exists | Inspect the existing tag and digest for the same commit before retrying |
+| Build and publication images differ | Review the separate builds and the publication digest |
+| Jenkins cannot resolve a release | Verify the full SHA is in `main` and its exact tag still exists in ECR |
 
-## Planned Improvements
-
-- Run Jenkins validation from SCM once `jenkinsfile` is available on the selected branch.
-- Give Jenkins a renewable workload identity and scope its SSM and S3 deployment permissions.
-- Resolve the approved commit tag to a digest and add the Ansible deployment and health checks.
-- Build once and promote the same verified artifact.
-- Add software bill of materials and provenance generation.
-- Evaluate image signing and vulnerability-policy gates.
-- Make environment-specific role and registry values configurable.
-- Add an explicit, reviewed deployment approval with readiness verification.
-- Implement release records and tested rollback by known-good digest.
+See [Testing](testing.md#operator-verified-delivery-evidence) for reported
+deployments, rollback, lock tests, failure simulations, and restore evidence.
 

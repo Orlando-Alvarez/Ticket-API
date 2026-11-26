@@ -130,6 +130,11 @@ bootstrap: the HTTPS Nginx container requires an existing certificate, while
 the credentials playbook reuses the environment created by application
 deployment.
 
+The Jenkins release preflight requires a ready API and an existing pinned
+image. Use the authorized [host setup procedure](deployment.md#configure-the-ec2-host)
+when bootstrapping or rebuilding EC2. Routine image delivery reuses the
+certificate mount. DDNS and renewal remain host-side systemd services.
+
 Run Ansible from Ubuntu WSL at the repository root. Use placeholders and keep
 the Cloudflare tokens in Parameter Store rather than shell variables.
 
