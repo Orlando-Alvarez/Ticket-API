@@ -6,6 +6,8 @@ pipeline{
     options{
         disableConcurrentBuilds()
         timeout(time:30, unit: 'MINUTES')
+
+        lock(resource: 'ticket-api-ec2-deployment')
     }
 
     parameters{
