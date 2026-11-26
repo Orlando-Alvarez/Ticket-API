@@ -1,0 +1,67 @@
+---
+- name: Inspect Ticket-API recovery state
+  hosts: ticket_api
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Inspect Ticket-API container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - ticket-api
+      register: container_inspection
+      changed_when: false
+      failed_when: false
+
+    - name: Parse container information
+      ansible.builtin.set_fact:
+        current_container: >-
+          {{
+            (container_inspection.stdout | from_json | first)
+            if container_inspection.rc == 0
+            else {}
+          }}
+
+    - name: Check API readiness
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080/api/v1/health/ready
+        method: GET
+        status_code: 200
+        timeout: 5
+      register: readiness_result
+      changed_when: false
+      failed_when: false
+
+    - name: Define recovery state
+      ansible.builtin.set_fact:
+        recovery_state:
+          container_exists: "{{ container_inspection.rc == 0 }}"
+          image: >-
+            {{
+              current_container.get('Config', {}).get('Image', 'UNAVAILABLE')
+            }}
+          running: >-
+            {{
+              current_container.get('State', {}).get('Running', false)
+            }}
+          health: >-
+            {{
+              (current_container.get('State', {}).get('Health') or {})
+              .get('Status', 'UNKNOWN')
+            }}
+          readiness_status: "{{ readiness_result.status | default(-1) | int }}"
+
+    - name: Display recovery state
+      ansible.builtin.debug:
+        var: recovery_state
+
+    - name: Save recovery state on Jenkins agent
+      ansible.builtin.copy:
+        content: "{{ recovery_state | to_nice_json }}\n"
+        dest: "{{ lookup('ansible.builtin.env', 'WORKSPACE') }}/recovery-state.json"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: lookup('ansible.builtin.env', 'WORKSPACE') | length > 0
