@@ -229,9 +229,13 @@ pipeline{
 
                         echo "Checking EC2 deployment prerequisites..."
 
+                        rm -f previous-image.txt
+
                         /opt/ansible/bin/ansible-playbook \
                             -i ansible/Inventory/hosts.yml \
                             ansible/playbooks/preflight.yml
+
+                        test -s previous-image.txt
 
                         echo "EC2 deployment prerequisites verified"
                     '''
@@ -302,6 +306,11 @@ pipeline{
             }
 
             steps {
+                script {
+                    env.DEPLOYMENT_STARTED = 'true'
+                    echo "Deployment phase started"
+                }
+
                 sh '''
                     set -eu
 
@@ -335,6 +344,42 @@ pipeline{
 
                     echo "Deployment verification completed successfully"
                 '''
+            }
+        }
+    }
+    post{
+        success{
+            echo "Ticket-API deployment pipeline completed successfully"
+        }
+
+        failure {
+            script {
+                if (env.DEPLOYMENT_STARTED == 'true') {
+                    echo "========================================"
+                    echo "DEPLOYMENT FAILURE DETECTED"
+                    echo "========================================"
+
+                    echo "Requested release: ${params.RELEASE_SHA}"
+                    echo "Requested digest: ${env.RELEASE_DIGEST ?: 'unknown'}"
+
+                    if (fileExists('previous-image.txt')) {
+                    def previousImage = readFile('previous-image.txt').trim()
+
+                        echo "Previous image reference:"
+                        echo previousImage
+                    } else {
+                        echo "WARNING: Previous image reference unavailable"
+                    }
+
+                    echo "Recovery may be required"
+                    echo "Inspect the current EC2 state before proceeding"
+                    echo "Use Jenkins job: ticket-api-rollback"
+                    echo "Database restoration must NOT be automatic"
+
+                } else {
+                    echo "Pipeline failed before deployment started"
+                    echo "No application rollback is indicated"
+                }
             }
         }
     }
