@@ -179,8 +179,8 @@ pipeline {
 
                     /opt/ansible/bin/ansible-playbook \
                         -i ansible/Inventory/hosts.yml \
+                        
                         ansible/playbooks/rollback_preflight.yml
-                    
                     test -s previous-image.txt
                 '''
 
