@@ -38,18 +38,20 @@ has successfully assumed the role and published an image on `main`.
 | EC2 | Amazon Linux 2023, `t2.small` default, public subnet, public IP |
 | Root storage | Encrypted 16 GiB gp3, deleted on instance termination |
 | Instance metadata | IMDSv2 tokens required |
-| IAM role/profile | Systems Manager core, pull-only ECR, and scoped secret-read access |
+| EC2 IAM role/profile | Systems Manager core, pull-only ECR, scoped secret reads, and backup-prefix object permissions |
 | AWS KMS | Customer-managed symmetric key, automatic key-material rotation, alias, and 30-day deletion window |
 | Parameter Store | Four KMS-encrypted `SecureString` values for the application, DDNS, and Certbot |
 | Amazon ECR | Private repository, immutable tags, scan on push, AES-256 encryption |
-| ECR lifecycle | Retains the 10 most recent images |
+| ECR lifecycle | Expires untagged images 90 days after push. Tagged images are outside this rule |
 | GitHub OIDC provider | Trusts tokens issued by GitHub Actions for the AWS STS audience |
 | GitHub ECR publisher role | Trusts only this repository's `main` branch and can push only to the Ticket-API ECR repository |
-| Jenkins development role and inline policy | Trusts one development IAM user and grants repository-scoped ECR metadata reads. References an existing managed permissions boundary. |
-| Amazon S3 | Private Ansible transfer bucket, AES-256 encryption, one-day expiration |
+| Jenkins deployment role | Trusts one development IAM user, references an external permissions boundary, and has scoped ECR, SSM and transfer-bucket policies |
+| Amazon S3 transfer bucket | Private Ansible transfers, SSE-S3 encryption, one-day object expiration |
+| Amazon S3 backup bucket | Private, versioned PostgreSQL archives, SSE-S3 encryption, retention rules and Terraform destruction guard |
 
-The private subnet currently hosts no project workload. The S3 bucket exists
-for temporary Ansible module and file transfers over the SSM connection.
+The private subnet currently hosts no project workload. The transfer bucket
+stores temporary Ansible modules and files for SSM sessions. The separate
+backup bucket stores PostgreSQL logical dumps independently of EC2.
 
 ## KMS and Parameter Store Integration
 
@@ -149,7 +151,7 @@ shows successful OIDC authentication, ECR login, and image push. See
 [CI/CD and Image Delivery](ci-cd.md) for the job dependencies and artifact
 handoff.
 
-## Jenkins Development Role
+## Jenkins Deployment Role
 
 [`iam_jenkins.tf`](../terraform/iam_jenkins.tf) declares
 `aws_iam_role.jenkins_deployer` (`ticket-api-dev-jenkins-deployer` with the
@@ -160,9 +162,32 @@ grants `ecr:DescribeImages` and `ecr:ListImages` on the Ticket-API ECR repositor
 Terraform attaches `TicketAPI-Jenkins-PermissionsBoundary` to the role by
 referencing the ARN of a customer-managed policy created separately in AWS.
 The boundary policy's document and lifecycle are outside this root module.
-The Jenkins role's declared permissions cover ECR metadata reads. SSM
-sessions, S3 transfers, image pulls, and EC2 deployment require other
-identities or permissions.
+The `jenkins-ssm-deploy` inline policy scopes `ssm:StartSession` to the
+configured EC2 instance and the Session Manager shell document. It includes
+session operations subject to its session condition, transfer-bucket listing
+and location, and temporary object operations under the target-instance
+prefix. Image pulls, secret decryption, and backup uploads use the EC2 role.
+The operator supplies Jenkins's interactive source credentials separately.
+The repository has no IAM Roles Anywhere configuration for Jenkins.
+
+## PostgreSQL Backup Storage
+
+[`s3_backups.tf`](../terraform/s3_backups.tf) creates a separate backup bucket
+with all public access blocked, default `AES256` encryption, and versioning.
+The lifecycle rule covers `postgresql/`. It expires current objects after
+90 days and noncurrent versions after 30 days and aborts incomplete
+multipart uploads after 7 days. The upload playbook writes under
+`postgresql/automated/`. In a versioned bucket, current-object expiration can
+leave older versions until their noncurrent age reaches the rule threshold.
+
+Terraform's `prevent_destroy` protects the resource from Terraform plans
+that would destroy it while the guard is present. External deletions remain
+subject to AWS permissions. The bucket has no Object Lock.
+[`iam_backups.tf`](../terraform/iam_backups.tf) grants the EC2 role
+`s3:PutObject`, `s3:GetObject` and `s3:AbortMultipartUpload` under
+`postgresql/*`. The Jenkins role uses the transfer bucket for orchestration.
+See [Backup and Restore](backup-and-restore.md) for backup creation, restore
+testing and disk usage limits.
 
 ## Terraform Workflow on Windows PowerShell
 
@@ -210,6 +235,7 @@ Terraform currently exports:
 
 ```bash
 terraform -chdir=terraform output -raw ecr_repository_url
+terraform -chdir=terraform output -raw postgres_backup_bucket_name
 ```
 
 It does not export the EC2 instance ID, public IP, or Ansible transfer bucket.
@@ -223,9 +249,9 @@ change.
 | `ticketapi-tf` | Assumes `TicketAPI-Terraform-Deployer` to provision represented resources |
 | `ticketapi-dev` | Runs Ansible through SSM and accesses the dedicated transfer bucket |
 | GitHub ECR publisher role | Accepts short-lived OIDC sessions from this repository's `main` branch and pushes only to its ECR repository |
-| Jenkins development role | Assumed through the local `ticketapi-jenkins` profile for repository-scoped ECR metadata reads |
+| Jenkins deployment role | Assumed through `ticketapi-jenkins` for ECR metadata, SSM sessions and scoped Ansible transfers |
 | Authorized publisher profile | Supports the documented manual publication fallback |
-| EC2 instance role | Registers with SSM, pulls from ECR, and reads/decrypts deployment secrets without static keys |
+| EC2 instance role | Registers with SSM, pulls from ECR, reads and decrypts deployment secrets, and accesses PostgreSQL backup objects |
 
 ### Terraform Controller Bootstrap
 
@@ -258,7 +284,7 @@ The operator reported a separately configured, limited administrative IAM
 policy for the Terraform role to create and manage the Jenkins role. That
 administrative policy and the Jenkins boundary's rules are AWS-side bootstrap
 dependencies. Provisioning authority belongs to the Terraform identity.
-Jenkins uses the runtime role with the narrower ECR read policy.
+Jenkins uses the bounded deployment role with scoped runtime policies.
 
 The custom EC2 inline policy allows `ssm:GetParameter` and
 `ssm:GetParameters` for only the four calculated parameter ARNs. It allows
@@ -304,6 +330,8 @@ issues, or pull requests.
   [AWS Systems Manager pricing](https://aws.amazon.com/systems-manager/pricing/).
 - EC2, EBS, public IPv4, S3, data transfer, and related service usage remain
   billable independently of this secret-management design.
+- Versioned backups, ECR tagged image storage, and requests can accrue
+  charges as volume grows.
 - Cloudflare plan or domain charges, if applicable, remain external to AWS.
   Let's Encrypt does not add an AWS certificate-service charge, but the host,
   public IPv4, DNS traffic, and automation still consume their respective
@@ -332,7 +360,8 @@ fixed monthly cost estimate.
   automated by the repository files.
 - Public reachability depends on DDNS correcting the A record after an EC2
   public-address change and on DNS cache expiration.
-- Backups, recovery, monitoring, and alerting are not provisioned.
+- Pre-change backups are implemented. Scheduled backups, recurring isolated
+  restore drills, monitoring, and alerts remain future work.
 - Cloudflare is configured as DNS-only, so client traffic reaches the EC2
   origin directly and does not receive Cloudflare proxy protections.
 

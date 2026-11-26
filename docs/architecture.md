@@ -15,12 +15,13 @@ Ticket-API currently has four operating contexts:
    PostgreSQL, migrations, FastAPI, and Nginx.
 3. **AWS delivery and deployment:** Terraform provisions infrastructure.
    GitHub Actions publishes commit-tagged images to private ECR after the
-   quality gates on `main`. An operator runs Ansible from Ubuntu WSL to deploy
-   a selected digest to EC2 over Systems Manager.
-4. **Local Jenkins validation:** A Docker controller and inbound agent
-   exercise AWS identity and ECR metadata access ahead of deployment automation.
+   quality gates on `main`. Jenkins delivers an approved digest to EC2
+   through Ansible and Systems Manager. Ubuntu WSL remains an operator
+   alternative.
+4. **Local Jenkins control plane:** A Docker controller schedules jobs on an
+   inbound agent. Deployment and rollback use this agent to run Ansible.
 
-The AWS deployment is publicly reachable at
+The AWS configuration serves
 `https://api.orlandoalvarez.dev`. Nginx publishes HTTPS on TCP 443 while its
 HTTP listener remains bound to `127.0.0.1:8080` for readiness checks.
 Cloudflare supplies DNS only; requests connect directly to EC2.
@@ -228,18 +229,19 @@ flowchart TB
     Agent -->|"Assume role and check identity"| STS[AWS STS]
     STS --> JenkinsRole[Jenkins development role]
     JenkinsRole -->|"ECR metadata read"| ECR
+    JenkinsRole -->|"Scoped managed sessions"| SSM[AWS Systems Manager]
+    JenkinsRole -->|"Temporary modules and files"| S3[S3 transfer bucket]
     AWS --> Parameters[Parameter Store<br/>SecureString]
     AWS --> KMS[Customer-managed KMS key]
     Parameters -->|encrypted with| KMS
     EC2 --> Profile[IAM instance profile]
-    Profile --> SSM[AWS Systems Manager]
+    Profile -->|"Registers managed instance"| SSM
     Profile -->|pull only| ECR
     Profile -->|scoped read and decrypt| Parameters
+    Profile -->|"Backup object write and read"| Backup[S3 PostgreSQL backup bucket]
     ManualAnsible["Manual Ansible in Ubuntu WSL<br/>ticketapi-dev"] --> SSM
-    Agent -.->|"Planned deployment stage"| JenkinsAnsible["Ansible inside ticket-api-cd-agent"]
-    JenkinsAnsible -.->|"Planned SSM connection"| SSM
     SSM -->|"Managed session"| EC2
-    ManualAnsible -. temporary modules .-> S3[Private encrypted S3 bucket]
+    ManualAnsible -->|"Temporary modules and files"| S3
     EC2 --> DDNS[DDNS systemd service]
     IMDS[IMDSv2] -->|public IPv4| DDNS
     DDNS -->|update A record| Cloudflare
@@ -258,14 +260,14 @@ flowchart LR
     Change[Push to main] --> CI[GitHub Actions quality gates]
     CI --> OIDC[OIDC role assumption]
     OIDC -->|build and push<br/>sha-commit tag| ECR[Private ECR<br/>immutable tag]
-    Jenkins[Jenkins Docker agent] -->|"Read image metadata"| ECR
-    ECR -->|"Operator selects digest"| Operator[Operator]
-    Operator --> ManualAnsible["Manual Ansible in Ubuntu WSL"]
-    Jenkins -.->|"Planned deployment stage"| JenkinsAnsible["Ansible inside ticket-api-cd-agent"]
+    Jenkins[Jenkins Docker agent] -->|"Resolve commit tag to digest"| ECR
+    Operator[Operator] -->|"Approve deployment or rollback"| Jenkins
+    Operator -->|"Manual alternative"| ManualAnsible["Ansible in Ubuntu WSL"]
+    Jenkins --> JenkinsAnsible["Ansible inside ticket-api-cd-agent"]
     ECR -->|"EC2 pulls selected digest"| Image[Local image on EC2]
     ManualAnsible --> SSM[AWS Systems Manager]
-    JenkinsAnsible -.->|"Planned SSM connection"| SSM
-    SSM --> Deploy[Deployment automation on EC2]
+    JenkinsAnsible --> SSM
+    SSM --> Deploy[Preflight, backup and deployment on EC2]
     Deploy --> Sync[Host-side Boto3<br/>secret synchronization]
     Role[EC2 IAM role] --> Parameters[Parameter Store<br/>SecureString]
     Parameters -->|KMS decryption| Sync
@@ -285,6 +287,7 @@ flowchart LR
     Nginx --> API
     API --> DB
     Migrate --> DB
+    DB -->|"Logical backup before changes"| Backups[(S3 backup bucket)]
 ```
 
 The workflow requests permission to mint an OIDC token only in the ECR
@@ -295,11 +298,11 @@ after both test jobs and the Docker build succeed. A successful
 [`main` run](https://github.com/Orlando-Alvarez/Ticket-API/actions/runs/44975797065)
 confirmed role assumption and image publication.
 
-The operator's local Jenkins result confirmed AWS identity and ECR metadata
-access for the tested script. The current manual deployment runs Ansible from
-Ubuntu WSL. The dashed deployment path shows the planned Jenkins stage, with
-Ansible running inside `ticket-api-cd-agent` and connecting to EC2 through AWS
-Systems Manager. See [pipeline evidence](ci-cd.md#pipeline-behavior-and-evidence).
+Jenkins runs Ansible inside `ticket-api-cd-agent`. The operator can also run
+the playbooks from Ubuntu WSL. Both use Systems Manager. Jenkins adds
+approval, a shared lock across deployment and rollback, backup, and final
+verification. Ansible copies Compose, Nginx, and synchronization files from
+its current checkout, which can differ from the selected image's commit.
 
 The API and migration services use the same ECR image. The image is pulled
 before Compose runs and is selected through
@@ -311,16 +314,28 @@ local file; they do not access Parameter Store directly. Separate host-side
 automation retrieves the Cloudflare tokens, synchronizes DNS, renews the
 certificate, and reloads Nginx only after configuration validation.
 
-## Planned Architecture Additions
+## Failure Domains and Planned Work
 
-The following components are not implemented:
+EC2 hosts the reverse proxy, API and PostgreSQL on one origin. An instance,
+disk, or Docker outage can affect the request path and local data together.
+S3 retains logical dumps independently. The transfer bucket serves Ansible
+sessions. ECR or SSM failure can prevent a release while the current runtime
+continues serving. Jenkins controller, agent, or credential loss affects
+the delivery control plane.
+
+The approved rollback job exchanges application images and keeps the live
+PostgreSQL volume and migration history. A deployment failure after Ansible
+starts triggers best-effort state collection for operator review. See
+[Disaster Recovery](disaster-recovery.md) and [Backup and Restore](backup-and-restore.md).
+
+Planned work includes:
 
 - Automated clean-host certificate bootstrap
 - Automated PostgreSQL and JWT secret rotation
-- Build-once artifact promotion, reviewed deployment, and automated rollback
+- Build-once artifact promotion and release-aligned deployment configuration
 - Centralized metrics, logs, dashboards, and alerts
 - Remote Terraform state and locking
-- PostgreSQL backup and disaster recovery
+- Scheduled backups, recurring restore drills, and measured recovery objectives
 - Multi-host scheduling or high availability
 
 The current public deployment is a single EC2 origin using a DNS-only record.

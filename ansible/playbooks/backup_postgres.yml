@@ -1,0 +1,110 @@
+
+---
+- name: Backup Ticket-API PostgreSQL to S3
+  hosts: ticket_api
+  gather_facts: false
+  become: true
+
+  vars:
+    backup_bucket: ticket-api-dev-postgres-backups-891920435362-us-west-2
+    backup_region: us-west-2
+    backup_dir: /var/backups/ticket-api
+
+  tasks:
+    - name: Verify PostgreSQL availability
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - ticket-api-db
+          - sh
+          - -c
+          - 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+      changed_when: false
+
+    - name: Create protected backup directory
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Generate UTC backup timestamp
+      ansible.builtin.command: date -u +%Y%m%dT%H%M%SZ
+      register: backup_timestamp
+      changed_when: false
+
+    - name: Define backup paths
+      ansible.builtin.set_fact:
+        backup_filename: "ticket-api-{{ backup_timestamp.stdout }}.dump"
+        backup_s3_prefix: "postgresql/automated"
+
+    - name: Create PostgreSQL backup
+      ansible.builtin.shell: |
+        set -euo pipefail
+        umask 077
+        docker exec ticket-api-db sh -c \
+          'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc --no-owner --no-acl' \
+          > "{{ backup_dir }}/{{ backup_filename }}"
+      args:
+        executable: /bin/bash
+
+    - name: Validate backup archive
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test -s "{{ backup_dir }}/{{ backup_filename }}"
+        docker exec -i ticket-api-db pg_restore --list \
+          < "{{ backup_dir }}/{{ backup_filename }}" > /dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Inspect backup file size
+      ansible.builtin.stat:
+        path: "{{ backup_dir }}/{{ backup_filename }}"
+      register: backup_file_stat
+
+    - name: Upload backup to Amazon S3
+      ansible.builtin.command:
+        argv:
+          - aws
+          - s3
+          - cp
+          - "{{ backup_dir }}/{{ backup_filename }}"
+          - "s3://{{ backup_bucket }}/{{ backup_s3_prefix }}/{{ backup_filename }}"
+          - --region
+          - "{{ backup_region }}"
+          - --sse
+          - AES256
+
+    - name: Verify backup metadata in S3
+      ansible.builtin.command:
+        argv:
+          - aws
+          - s3api
+          - head-object
+          - --bucket
+          - "{{ backup_bucket }}"
+          - --key
+          - "{{ backup_s3_prefix }}/{{ backup_filename }}"
+          - --region
+          - "{{ backup_region }}"
+          - --query
+          - "{Size:ContentLength,Encryption:ServerSideEncryption}"
+          - --output
+          - json
+      register: s3_backup_metadata
+      changed_when: false
+
+    - name: Assert S3 backup is valid
+      ansible.builtin.assert:
+        that:
+          - "((s3_backup_metadata.stdout | from_json).Size | int) == (backup_file_stat.stat.size | int)"
+          - "(s3_backup_metadata.stdout | from_json).Encryption == 'AES256'"
+        fail_msg: "S3 backup verification failed"
+        success_msg: "S3 backup metadata verified successfully"
+
+    - name: Display backup location
+      ansible.builtin.debug:
+        msg: "Backup stored at s3://{{ backup_bucket }}/{{ backup_s3_prefix }}/{{ backup_filename }}"

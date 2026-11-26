@@ -5,7 +5,9 @@ pipeline{
 
     options{
         disableConcurrentBuilds()
-        timeout(time:10, unit: 'MINUTES')
+        timeout(time:30, unit: 'MINUTES')
+
+        lock(resource: 'ticket-api-ec2-deployment')
     }
 
     parameters{
@@ -75,11 +77,36 @@ pipeline{
                         }
 
                         env.RELEASE_DIGEST = digest
+                        env.VERIFIED_RELEASE_SHA = selectedSha
 
                         echo "Selected tag: sha-${selectedSha}"
                         echo "Validated image digest: ${digest}"
                     }
                 }
+            }
+        }
+        stage('Verify Release Commit') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Verifying release commit against main..."
+
+                    git fetch --no-tags origin \
+                        '+refs/heads/main:refs/remotes/origin/main'
+
+                    git cat-file -e "${VERIFIED_RELEASE_SHA}^{commit}"
+
+                    if ! git merge-base --is-ancestor \
+                        "$VERIFIED_RELEASE_SHA" \
+                        "refs/remotes/origin/main"; then
+
+                        echo "ERROR: Release commit is not in main" >&2
+                        exit 1
+                    fi
+
+                    echo "Release commit verified in main"
+                '''
             }
         }
         stage('Verify Deployment Tooling'){
@@ -155,10 +182,14 @@ pipeline{
                         return input(
                             message: """Approve deployment of Ticket-API?
 
-        Commit: ${params.RELEASE_SHA}
-        Image digest: ${env.RELEASE_DIGEST}
+                                Commit: ${params.RELEASE_SHA}
+                                Image digest: ${env.RELEASE_DIGEST}
 
-        DRY RUN: No EC2 deployment will occur.""",
+                                REAL DEPLOYMENT
+
+                                The selected Docker image will be deployed to EC2.
+                                A PostgreSQL backup will be created before deployment.
+                                Alembic migrations may be executed.""",
                             ok: 'Approve',
                             submitter: 'Admin',
                             submitterParameter: 'APPROVED_BY'
@@ -167,7 +198,7 @@ pipeline{
 
                     echo "Deployment approved by: ${approvedBy}"
                     echo "Release digest: ${env.RELEASE_DIGEST}"
-                    echo 'DRY RUN: No changes were made to EC2'
+                    echo "Deployment approved. Proceeding with pre-deployment checks, backup and deployment."
                 }
             }
         }
@@ -198,9 +229,13 @@ pipeline{
 
                         echo "Checking EC2 deployment prerequisites..."
 
+                        rm -f previous-image.txt
+
                         /opt/ansible/bin/ansible-playbook \
                             -i ansible/Inventory/hosts.yml \
                             ansible/playbooks/preflight.yml
+
+                        test -s previous-image.txt
 
                         echo "EC2 deployment prerequisites verified"
                     '''
@@ -246,6 +281,177 @@ pipeline{
                 '''
             }
         }
+        stage('Backup PostgreSQL') {
+            options {
+                timeout(time: 4, unit: 'MINUTES')
+            }
 
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Starting PostgreSQL backup..."
+
+                    /opt/ansible/bin/ansible-playbook \
+                        -i ansible/Inventory/hosts.yml \
+                        ansible/playbooks/backup_postgres.yml
+
+                    echo "PostgreSQL backup completed successfully"
+                '''
+            }
+        }
+        stage('Deploy Ticket-API') {
+            options {
+                timeout(time: 10, unit: 'MINUTES')
+            }
+
+            steps {
+                script {
+                    env.DEPLOYMENT_STARTED = 'true'
+                    echo "Deployment phase started"
+                }
+
+                sh '''
+                    set -eu
+
+                    echo "Starting Ticket-API deployment..."
+
+                    test -n "${RELEASE_DIGEST:-}"
+
+                    /opt/ansible/bin/ansible-playbook \
+                        -i ansible/Inventory/hosts.yml \
+                        ansible/playbooks/deploy_app.yml \
+                        -e "image_digest=$RELEASE_DIGEST"
+
+                    echo "Ansible deployment completed"
+                '''
+            }
+        }
+        stage('Verify Deployment') {
+            options {
+                timeout(time: 3, unit: 'MINUTES')
+            }
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Verifying Ticket-API deployment..."
+
+                    /opt/ansible/bin/ansible-playbook \
+                        -i ansible/Inventory/hosts.yml \
+                        ansible/playbooks/verify_deployment.yml \
+                        -e "image_digest=$RELEASE_DIGEST"
+
+                    echo "Deployment verification completed successfully"
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Ticket-API deployment completed successfully'
+        }
+
+        failure {
+            script {
+                if (env.DEPLOYMENT_STARTED == 'true') {
+
+                    echo 'DEPLOYMENT FAILURE DETECTED'
+
+                    // Retrieve previous image
+                    def previousImage = 'UNAVAILABLE'
+
+                    if (fileExists('previous-image.txt')) {
+                        previousImage = readFile(
+                            'previous-image.txt'
+                        ).trim()
+                    }
+
+                    // Inspect actual EC2 state
+                    def recoveryState = 'NOT VERIFIED'
+                    def inspectionError = 'NONE'
+
+                    try {
+                        sh 'rm -f recovery-state.json'
+
+                        timeout(time: 2, unit: 'MINUTES') {
+                            sh '''
+                                set -eu
+
+                                /opt/ansible/bin/ansible-playbook \
+                                    -i ansible/Inventory/hosts.yml \
+                                    ansible/playbooks/inspect_recovery.yml
+
+                                test -s recovery-state.json
+                            '''
+                        }
+
+                        recoveryState = readFile(
+                            'recovery-state.json'
+                        ).trim()
+
+                        echo 'EC2 recovery inspection completed'
+
+                    } catch (Exception e) {
+                        inspectionError = e.toString()
+
+                        echo 'WARNING: EC2 recovery inspection failed'
+                        echo inspectionError
+                    }
+
+                    def report = """
+    TICKET-API RECOVERY REPORT
+
+    Jenkins job: ${env.JOB_NAME}
+    Build number: ${env.BUILD_NUMBER}
+
+    Deployment started: true
+
+    REQUESTED RELEASE
+    SHA: ${params.RELEASE_SHA ?: 'UNKNOWN'}
+    Digest: ${env.RELEASE_DIGEST ?: 'UNKNOWN'}
+
+    PREVIOUS IMAGE
+    ${previousImage}
+
+    CURRENT EC2 STATE
+    ${recoveryState}
+
+    INSPECTION ERROR
+    ${inspectionError}
+
+    DATABASE
+    Automatic PostgreSQL restoration: NOT PERFORMED
+
+    REQUIRED ACTIONS
+
+    1. Review the deployment failure.
+    2. Inspect the actual EC2 state.
+    3. Determine whether rollback is necessary.
+    4. Verify application/database compatibility.
+    5. Confirm PostgreSQL backup availability.
+    6. Use ticket-api-rollback if appropriate.
+    """.stripIndent()
+
+                    writeFile(
+                        file: 'recovery-report.txt',
+                        text: report
+                    )
+
+                    archiveArtifacts(
+                        artifacts: 'recovery-report.txt,recovery-state.json',
+                        allowEmptyArchive: true,
+                        fingerprint: true
+                    )
+
+                    echo 'Recovery diagnostics archived successfully'
+
+                } else {
+                    echo 'Pipeline failed before deployment started'
+                    echo 'No application rollback is indicated'
+                }
+            }
+        }
     }
 }

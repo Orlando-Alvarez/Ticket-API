@@ -215,3 +215,12 @@ curl "http://127.0.0.1:8080/api/v1/users/me" \
 Passwords, access tokens, and password hashes must never be committed or
 included in screenshots.
 
+## Local Tests
+
+Run `python -m pytest --ignore=tests/integration -v` for application tests
+and `python -m ruff check app tests ansible/files/cloudflare_ddns.py` for
+the CI lint scope. The PostgreSQL integration suite uses a separate,
+disposable `ticket_api_test` database. Follow
+[Testing and Validation](testing.md#postgresql-integration-tests) before
+running tests that exercise migration downgrades.
+

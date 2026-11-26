@@ -1,0 +1,59 @@
+
+- name: Verify Ticket-API deployment
+  hosts: ticket_api
+  gather_facts: false
+  become: true
+
+  vars:
+    ecr_repository: "891920435362.dkr.ecr.us-west-2.amazonaws.com/ticket-api"
+    readiness_url: "http://127.0.0.1:8080/api/v1/health/ready"
+
+  tasks:
+    - name: Validate expected image digest
+      ansible.builtin.assert:
+        that:
+          - image_digest | default('') is match('^sha256:[0-9a-f]{64}$')
+        fail_msg: "A valid image_digest must be provided"
+
+    - name: Wait until API container is healthy
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - --format
+          - "{% raw %}{{.Config.Image}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}{% endraw %}"
+          - ticket-api
+      register: container_info
+      changed_when: false
+      retries: 12
+      delay: 5
+      until: >-
+        container_info.rc == 0 and
+        (container_info.stdout | default('')).endswith('|true|healthy')
+
+    - name: Verify deployed image matches requested release
+      ansible.builtin.assert:
+        that:
+          - container_info.stdout.split('|')[0] == (ecr_repository ~ '@' ~ image_digest)
+        fail_msg: "The deployed Docker image does not match the requested release"
+        success_msg: "Correct Docker image is deployed"
+
+    - name: Verify API readiness endpoint
+      ansible.builtin.uri:
+        url: "{{ readiness_url }}"
+        method: GET
+        status_code: 200
+        timeout: 5
+      register: readiness_result
+      retries: 15
+      delay: 5
+      until: readiness_result.status | default(0) == 200
+      changed_when: false
+
+    - name: Display deployment verification result
+      ansible.builtin.debug:
+        msg:
+          - "Deployment verification successful"
+          - "Image: {{ container_info.stdout.split('|')[0] }}"
+          - "Container health: healthy"
+          - "API readiness: HTTP {{ readiness_result.status }}"

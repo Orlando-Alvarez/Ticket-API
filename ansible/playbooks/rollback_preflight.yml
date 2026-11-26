@@ -1,0 +1,70 @@
+
+---
+- name: Verify Ticket-API rollback prerequisites
+  hosts: ticket_api
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Verify Docker daemon
+      ansible.builtin.command:
+        argv:
+          - docker
+          - info
+      changed_when: false
+
+    - name: Verify Docker Compose
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - version
+      changed_when: false
+
+    - name: Verify PostgreSQL availability
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - ticket-api-db
+          - sh
+          - -c
+          - 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+      changed_when: false
+
+    - name: Inspect current API image
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - --format
+          - "{% raw %}{{.Config.Image}}{% endraw %}"
+          - ticket-api
+      register: deployed_image
+      changed_when: false
+
+    - name: Validate current image reference
+      ansible.builtin.assert:
+        that:
+          - >-
+            deployed_image.stdout is match(
+              '^891920435362[.]dkr[.]ecr[.]us-west-2[.]amazonaws[.]com/ticket-api@sha256:[0-9a-f]{64}$'
+            )
+        fail_msg: "Cannot identify the current Ticket-API image safely"
+
+    - name: Save current image reference on Jenkins agent
+      ansible.builtin.copy:
+        content: "{{ deployed_image.stdout | trim }}\n"
+        dest: "{{ lookup('ansible.builtin.env', 'WORKSPACE') }}/previous-image.txt"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: lookup('ansible.builtin.env', 'WORKSPACE') | length > 0
+
+    - name: Display rollback prerequisites result
+      ansible.builtin.debug:
+        msg:
+          - "Docker is available"
+          - "PostgreSQL is accepting connections"
+          - "Current image: {{ deployed_image.stdout }}"
+          - "Rollback prerequisites verified"
