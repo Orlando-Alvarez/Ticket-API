@@ -316,5 +316,24 @@ pipeline{
                 '''
             }
         }
+        stage('Verify Deployment') {
+            options {
+                timeout(time: 3, unit: 'MINUTES')
+            }
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Verifying Ticket-API deployment..."
+
+                    /opt/ansible/bin/ansible-playbook \
+                        -i ansible/Inventory/hosts.yml \
+                        ansible/playbooks/verify_deployment.yml \
+                        -e "image_digest=$RELEASE_DIGEST"
+
+                    echo "Deployment verification completed successfully"
+                '''
+            }
+        }
     }
 }
