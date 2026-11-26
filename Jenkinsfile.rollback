@@ -59,7 +59,6 @@ pipeline {
                 }
             }
         }
-
         stage('Verify AWS Identity') {
             steps {
                 sh '''
@@ -80,7 +79,6 @@ pipeline {
                 '''
             }
         }
-
         stage('Verify Release History') {
             steps {
                 sh '''
@@ -105,7 +103,6 @@ pipeline {
                 '''
             }
         }
-
         stage('Verify Rollback Compatibility') {
             steps {
                 sh '''
@@ -129,7 +126,6 @@ pipeline {
                 '''
             }
         }
-
         stage('Resolve ECR Images') {
             steps {
                 script {
@@ -175,15 +171,17 @@ pipeline {
                 }
             }
         }
-
         stage('Verify Current EC2 Release') {
             steps {
                 sh '''
                     set -eu
+                    rm -f previous-image.txt
 
                     /opt/ansible/bin/ansible-playbook \
                         -i ansible/Inventory/hosts.yml \
-                        ansible/playbooks/preflight.yml
+                        ansible/playbooks/rollback_preflight.yml
+                    
+                    test -s previous-image.txt
                 '''
 
                 script {
@@ -203,7 +201,6 @@ pipeline {
                 )
             }
         }
-
         stage('Approve Rollback') {
             steps {
                 script {
@@ -228,7 +225,6 @@ Approve rollback?
                 }
             }
         }
-
         stage('Backup PostgreSQL') {
             options {
                 timeout(time: 4, unit: 'MINUTES')
@@ -244,15 +240,18 @@ Approve rollback?
                 '''
             }
         }
-
         stage('Recheck Current Release') {
             steps {
                 sh '''
                     set -eu
 
+                    rm -f previous-image.txt
+
                     /opt/ansible/bin/ansible-playbook \
                         -i ansible/Inventory/hosts.yml \
-                        ansible/playbooks/preflight.yml
+                        ansible/playbooks/rollback_preflight.yml
+
+                    test -s previous-image.txt
                 '''
 
                 script {
@@ -267,7 +266,6 @@ Approve rollback?
                 }
             }
         }
-
         stage('Rollback Ticket-API') {
             options {
                 timeout(time: 10, unit: 'MINUTES')
@@ -286,7 +284,6 @@ Approve rollback?
                 '''
             }
         }
-
         stage('Verify Rollback') {
             options {
                 timeout(time: 3, unit: 'MINUTES')
@@ -304,7 +301,6 @@ Approve rollback?
             }
         }
     }
-
     post {
         success {
             echo 'Rollback completed and verified successfully'
