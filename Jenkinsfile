@@ -347,38 +347,109 @@ pipeline{
             }
         }
     }
-    post{
-        success{
-            echo "Ticket-API deployment pipeline completed successfully"
+
+    post {
+        success {
+            echo 'Ticket-API deployment completed successfully'
         }
 
         failure {
             script {
                 if (env.DEPLOYMENT_STARTED == 'true') {
-                    echo "========================================"
-                    echo "DEPLOYMENT FAILURE DETECTED"
-                    echo "========================================"
 
-                    echo "Requested release: ${params.RELEASE_SHA}"
-                    echo "Requested digest: ${env.RELEASE_DIGEST ?: 'unknown'}"
+                    echo 'DEPLOYMENT FAILURE DETECTED'
+
+                    // Retrieve previous image
+                    def previousImage = 'UNAVAILABLE'
 
                     if (fileExists('previous-image.txt')) {
-                    def previousImage = readFile('previous-image.txt').trim()
-
-                        echo "Previous image reference:"
-                        echo previousImage
-                    } else {
-                        echo "WARNING: Previous image reference unavailable"
+                        previousImage = readFile(
+                            'previous-image.txt'
+                        ).trim()
                     }
 
-                    echo "Recovery may be required"
-                    echo "Inspect the current EC2 state before proceeding"
-                    echo "Use Jenkins job: ticket-api-rollback"
-                    echo "Database restoration must NOT be automatic"
+                    // Inspect actual EC2 state
+                    def recoveryState = 'NOT VERIFIED'
+                    def inspectionError = 'NONE'
+
+                    try {
+                        sh 'rm -f recovery-state.json'
+
+                        timeout(time: 2, unit: 'MINUTES') {
+                            sh '''
+                                set -eu
+
+                                /opt/ansible/bin/ansible-playbook \
+                                    -i ansible/Inventory/hosts.yml \
+                                    ansible/playbooks/inspect_recovery.yml
+
+                                test -s recovery-state.json
+                            '''
+                        }
+
+                        recoveryState = readFile(
+                            'recovery-state.json'
+                        ).trim()
+
+                        echo 'EC2 recovery inspection completed'
+
+                    } catch (Exception e) {
+                        inspectionError = e.toString()
+
+                        echo 'WARNING: EC2 recovery inspection failed'
+                        echo inspectionError
+                    }
+
+                    def report = """
+    TICKET-API RECOVERY REPORT
+
+    Jenkins job: ${env.JOB_NAME}
+    Build number: ${env.BUILD_NUMBER}
+
+    Deployment started: true
+
+    REQUESTED RELEASE
+    SHA: ${params.RELEASE_SHA ?: 'UNKNOWN'}
+    Digest: ${env.RELEASE_DIGEST ?: 'UNKNOWN'}
+
+    PREVIOUS IMAGE
+    ${previousImage}
+
+    CURRENT EC2 STATE
+    ${recoveryState}
+
+    INSPECTION ERROR
+    ${inspectionError}
+
+    DATABASE
+    Automatic PostgreSQL restoration: NOT PERFORMED
+
+    REQUIRED ACTIONS
+
+    1. Review the deployment failure.
+    2. Inspect the actual EC2 state.
+    3. Determine whether rollback is necessary.
+    4. Verify application/database compatibility.
+    5. Confirm PostgreSQL backup availability.
+    6. Use ticket-api-rollback if appropriate.
+    """.stripIndent()
+
+                    writeFile(
+                        file: 'recovery-report.txt',
+                        text: report
+                    )
+
+                    archiveArtifacts(
+                        artifacts: 'recovery-report.txt,recovery-state.json',
+                        allowEmptyArchive: true,
+                        fingerprint: true
+                    )
+
+                    echo 'Recovery diagnostics archived successfully'
 
                 } else {
-                    echo "Pipeline failed before deployment started"
-                    echo "No application rollback is indicated"
+                    echo 'Pipeline failed before deployment started'
+                    echo 'No application rollback is indicated'
                 }
             }
         }
