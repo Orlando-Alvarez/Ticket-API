@@ -1,0 +1,316 @@
+
+pipeline {
+    agent {
+        label 'ticket-api-cd'
+    }
+
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(
+            name: 'CURRENT_SHA',
+            defaultValue: '',
+            description: 'Full SHA of the release expected to be running on EC2'
+        )
+
+        string(
+            name: 'ROLLBACK_SHA',
+            defaultValue: '',
+            description: 'Full SHA of the previous release to restore'
+        )
+    }
+
+    environment {
+        AWS_PROFILE = 'ticketapi-jenkins'
+        AWS_DEFAULT_REGION = 'us-west-2'
+        ECR_REPOSITORY = 'ticket-api'
+        ECR_REPO_URL = '891920435362.dkr.ecr.us-west-2.amazonaws.com/ticket-api'
+    }
+
+    stages {
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    def current = params.CURRENT_SHA?.trim() ?: ''
+                    def target = params.ROLLBACK_SHA?.trim() ?: ''
+
+                    if (!(current ==~ /^[0-9a-f]{40}$/)) {
+                        error('CURRENT_SHA must be a full 40-character SHA')
+                    }
+
+                    if (!(target ==~ /^[0-9a-f]{40}$/)) {
+                        error('ROLLBACK_SHA must be a full 40-character SHA')
+                    }
+
+                    if (current == target) {
+                        error('Current and rollback releases must be different')
+                    }
+
+                    env.EXPECTED_SHA = current
+                    env.TARGET_SHA = target
+
+                    echo "Expected current release: ${current}"
+                    echo "Requested rollback release: ${target}"
+                }
+            }
+        }
+
+        stage('Verify AWS Identity') {
+            steps {
+                sh '''
+                    set -eu
+
+                    ARN=$(aws sts get-caller-identity \
+                        --query Arn --output text)
+
+                    case "$ARN" in
+                        arn:aws:sts::891920435362:assumed-role/ticket-api-dev-jenkins-deployer/*)
+                            echo "Correct Jenkins IAM role"
+                            ;;
+                        *)
+                            echo "ERROR: Unexpected AWS identity: $ARN" >&2
+                            exit 1
+                            ;;
+                    esac
+                '''
+            }
+        }
+
+        stage('Verify Release History') {
+            steps {
+                sh '''
+                    set -eu
+
+                    git fetch --no-tags origin \
+                        '+refs/heads/main:refs/remotes/origin/main'
+
+                    for SHA in "$EXPECTED_SHA" "$TARGET_SHA"; do
+                        git cat-file -e "${SHA}^{commit}"
+                        git merge-base --is-ancestor \
+                            "$SHA" refs/remotes/origin/main
+                    done
+
+                    git merge-base --is-ancestor \
+                        "$TARGET_SHA" "$EXPECTED_SHA" || {
+                            echo "ERROR: Target is not an ancestor of current release" >&2
+                            exit 1
+                        }
+
+                    echo "Release history verified"
+                '''
+            }
+        }
+
+        stage('Verify Rollback Compatibility') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Checking application, migration and Compose changes..."
+
+                    if ! git diff --quiet \
+                        "$TARGET_SHA" "$EXPECTED_SHA" \
+                        -- app/ alembic/ \
+                           docker-compose.yml \
+                           compose.prod.yaml \
+                           compose.aws.yaml; then
+
+                        echo "ERROR: Application, migration or Compose changes detected" >&2
+                        echo "Manual compatibility review is required" >&2
+                        exit 1
+                    fi
+
+                    echo "No application, migration or Compose differences detected"
+                '''
+            }
+        }
+
+        stage('Resolve ECR Images') {
+            steps {
+                script {
+                    def currentDigest = sh(
+                        script: '''
+                            aws ecr describe-images \
+                                --repository-name "$ECR_REPOSITORY" \
+                                --image-ids "imageTag=sha-$EXPECTED_SHA" \
+                                --query 'imageDetails[0].imageDigest' \
+                                --output text
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    def targetDigest = sh(
+                        script: '''
+                            aws ecr describe-images \
+                                --repository-name "$ECR_REPOSITORY" \
+                                --image-ids "imageTag=sha-$TARGET_SHA" \
+                                --query 'imageDetails[0].imageDigest' \
+                                --output text
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    if (!(currentDigest ==~ /^sha256:[0-9a-f]{64}$/)) {
+                        error('Invalid current image digest')
+                    }
+
+                    if (!(targetDigest ==~ /^sha256:[0-9a-f]{64}$/)) {
+                        error('Invalid rollback image digest')
+                    }
+
+                    if (currentDigest == targetDigest) {
+                        error('Both releases resolve to the same image')
+                    }
+
+                    env.CURRENT_DIGEST = currentDigest
+                    env.TARGET_DIGEST = targetDigest
+
+                    echo "Current digest: ${currentDigest}"
+                    echo "Rollback digest: ${targetDigest}"
+                }
+            }
+        }
+
+        stage('Verify Current EC2 Release') {
+            steps {
+                sh '''
+                    set -eu
+
+                    /opt/ansible/bin/ansible-playbook \
+                        -i ansible/Inventory/hosts.yml \
+                        ansible/playbooks/preflight.yml
+                '''
+
+                script {
+                    def runningImage = readFile('previous-image.txt').trim()
+                    def expectedImage = "${env.ECR_REPO_URL}@${env.CURRENT_DIGEST}"
+
+                    if (runningImage != expectedImage) {
+                        error("EC2 is not running the expected release: ${runningImage}")
+                    }
+
+                    echo "Running release verified"
+                }
+
+                archiveArtifacts(
+                    artifacts: 'previous-image.txt',
+                    fingerprint: true
+                )
+            }
+        }
+
+        stage('Approve Rollback') {
+            steps {
+                script {
+                    input(
+                        message: """
+ROLLBACK TICKET-API
+
+Current release:
+${env.EXPECTED_SHA}
+
+Rollback release:
+${env.TARGET_SHA}
+
+A PostgreSQL backup will be created.
+The previous Docker image will be deployed.
+Database restoration is NOT included.
+
+Approve rollback?
+""",
+                        ok: 'Execute Rollback'
+                    )
+                }
+            }
+        }
+
+        stage('Backup PostgreSQL') {
+            options {
+                timeout(time: 4, unit: 'MINUTES')
+            }
+
+            steps {
+                sh '''
+                    set -eu
+
+                    /opt/ansible/bin/ansible-playbook \
+                        -i ansible/Inventory/hosts.yml \
+                        ansible/playbooks/backup_postgres.yml
+                '''
+            }
+        }
+
+        stage('Recheck Current Release') {
+            steps {
+                sh '''
+                    set -eu
+
+                    /opt/ansible/bin/ansible-playbook \
+                        -i ansible/Inventory/hosts.yml \
+                        ansible/playbooks/preflight.yml
+                '''
+
+                script {
+                    def actual = readFile('previous-image.txt').trim()
+                    def expected = "${env.ECR_REPO_URL}@${env.CURRENT_DIGEST}"
+
+                    if (actual != expected) {
+                        error('EC2 release changed before rollback. Aborting.')
+                    }
+
+                    echo 'Current release rechecked successfully'
+                }
+            }
+        }
+
+        stage('Rollback Ticket-API') {
+            options {
+                timeout(time: 10, unit: 'MINUTES')
+            }
+
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Deploying previous release..."
+
+                    /opt/ansible/bin/ansible-playbook \
+                        -i ansible/Inventory/hosts.yml \
+                        ansible/playbooks/deploy_app.yml \
+                        -e "image_digest=$TARGET_DIGEST"
+                '''
+            }
+        }
+
+        stage('Verify Rollback') {
+            options {
+                timeout(time: 3, unit: 'MINUTES')
+            }
+
+            steps {
+                sh '''
+                    set -eu
+
+                    /opt/ansible/bin/ansible-playbook \
+                        -i ansible/Inventory/hosts.yml \
+                        ansible/playbooks/verify_deployment.yml \
+                        -e "image_digest=$TARGET_DIGEST"
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Rollback completed and verified successfully'
+        }
+
+        failure {
+            echo 'ROLLBACK FAILED: Investigate EC2 before retrying.'
+            echo 'No automatic PostgreSQL restoration was performed.'
+        }
+    }
+}
